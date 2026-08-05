@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/klauspost/compress/zip"
@@ -885,4 +887,87 @@ func TestEncoderDictAddViaReset(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSharedDecoderTrainedDictRace verifies concurrent DecodeAll on one Decoder
+// that holds a trained dictionary does not race on dict.litEnc (gh-1180).
+func TestSharedDecoderTrainedDictRace(t *testing.T) {
+	weights := map[byte]int{'e': 40, 't': 20, 'a': 12, 'o': 8, 'i': 6, 'n': 5, 's': 4, 'h': 3, 'r': 2}
+	var alphabet []byte
+	for c, n := range weights {
+		for range n {
+			alphabet = append(alphabet, c)
+		}
+	}
+	sample := func(rng *rand.Rand, n int) []byte {
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = alphabet[rng.Intn(len(alphabet))]
+		}
+		return b
+	}
+
+	rng := rand.New(rand.NewSource(2000))
+	samples := make([][]byte, 2000)
+	for i := range samples {
+		samples[i] = sample(rng, 32+rng.Intn(200))
+	}
+	dict, err := BuildDict(BuildDictOptions{
+		ID:       12345,
+		Contents: samples,
+		History:  sample(rng, 12<<10),
+		Offsets:  [3]int{1, 4, 8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	enc, err := NewWriter(nil, WithEncoderDict(dict), WithEncoderConcurrency(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nFrames := 400
+	iters := 3000
+	goroutines := 48
+	if testing.Short() {
+		nFrames = 80
+		iters = 200
+		goroutines = 8
+	}
+	frames := make([][]byte, nFrames)
+	plains := make([][]byte, nFrames)
+	for i := 0; i < nFrames; i++ {
+		pt := sample(rng, 200+rng.Intn(800))
+		frames[i] = enc.EncodeAll(pt, nil)
+		plains[i] = pt
+	}
+	enc.Close()
+
+	dec, err := NewReader(nil, WithDecoderDicts(dict))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dec.Close()
+
+	var wg sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func(seed int) {
+			defer wg.Done()
+			r := rand.New(rand.NewSource(int64(seed)))
+			for i := 0; i < iters; i++ {
+				idx := r.Intn(len(frames))
+				out, err := dec.DecodeAll(frames[idx], nil)
+				if err != nil {
+					t.Errorf("decode error: %v", err)
+					return
+				}
+				if !bytes.Equal(out, plains[idx]) {
+					t.Errorf("output mismatch")
+					return
+				}
+			}
+		}(g + 1)
+	}
+	wg.Wait()
 }
