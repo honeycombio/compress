@@ -109,6 +109,63 @@ func TestBuildDictLevelPathsRoundTrip(t *testing.T) {
 	}
 }
 
+// Regression for https://github.com/klauspost/compress/issues/1179:
+// a homogeneous corpus with default (zero) Offsets used to emit a dictionary
+// whose recent-offsets table contained 0, which WithEncoderDict rejects.
+func TestBuildDictHomogeneousCorpusValidOffsets(t *testing.T) {
+	sample := func(seed int64) []byte {
+		const boiler = `<div class="card-grid" data-template="responsive"><style>.card-grid{display:grid;gap:6px;background:#0a0a0a;padding:4px}.card-item{color:#333;display:grid}</style><script>(function(){var n=document.querySelectorAll('[data-src]');for(var i=0;i<n.length;i++){var u=n[i].getAttribute('data-src');}})();</script>`
+		rng := rand.New(rand.NewSource(seed))
+		var out strings.Builder
+		out.WriteString(boiler)
+		for i := range 8 {
+			p := make([]byte, 32)
+			rng.Read(p)
+			out.WriteString(fmt.Sprintf(`{"url":"https://example.com/t?id=%d&p=%x"}`, i, p))
+		}
+		return []byte(out.String())
+	}
+	const sampleCount, historyLimit = 16, 8 << 10
+	samples := make([][]byte, sampleCount)
+	for i := range samples {
+		samples[i] = sample(12000 + int64(i))
+	}
+	var hist []byte
+	for _, s := range samples {
+		if len(hist)+len(s) > historyLimit {
+			break
+		}
+		hist = append(hist, s...)
+	}
+
+	dict, err := BuildDict(BuildDictOptions{
+		ID:       1,
+		Contents: samples,
+		History:  hist,
+		Level:    SpeedBetterCompression,
+	})
+	if err != nil {
+		t.Fatalf("BuildDict failed: %v", err)
+	}
+	enc, err := NewWriter(nil, WithEncoderDict(dict))
+	if err != nil {
+		t.Fatalf("WithEncoderDict rejected dictionary: %v", err)
+	}
+	enc.Close()
+	info, err := InspectDictionary(dict)
+	if err != nil {
+		t.Fatalf("InspectDictionary: %v", err)
+	}
+	for i, off := range info.Offsets() {
+		if off <= 0 {
+			t.Fatalf("offset[%d]=%d; want positive", i, off)
+		}
+		if off > info.ContentSize() {
+			t.Fatalf("offset[%d]=%d > content size %d", i, off, info.ContentSize())
+		}
+	}
+}
+
 func BenchmarkBuildDictLevelPaths(b *testing.B) {
 	samples, history, _ := buildDictLevelPathFixture()
 	for _, tt := range []struct {
