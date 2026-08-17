@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAll(t *testing.T) {
@@ -162,5 +165,67 @@ func testAllocs(t *testing.T, fn func()) {
 	t.Helper()
 	if allocs := int(testing.AllocsPerRun(10, fn)); allocs > 0 {
 		t.Fatalf("got %d allocation(s) (want zero)", allocs)
+	}
+}
+
+// gcWait collects while work runs in another goroutine, and reports the longest
+// a GC had to wait along with how long the work itself took. Work the runtime
+// cannot preempt shows up as a wait that is a large fraction of the work.
+func gcWait(work func()) (worst, elapsed time.Duration) {
+	done := make(chan struct{})
+	begin := time.Now()
+	go func() { defer close(done); work() }()
+	for {
+		select {
+		case <-done:
+			return worst, time.Since(begin)
+		default:
+		}
+		start := time.Now()
+		runtime.GC()
+		worst = max(worst, time.Since(start))
+	}
+}
+
+// TestDigestIsPreemptible fails on two counts, so that neither a fast machine
+// nor a loaded one decides the outcome. Both bars are relative, never absolute:
+// how long a GC waited against the hash it overlapped, and against a plain Go
+// loop, which is always preemptible and so gives this runner's noise floor.
+func TestDigestIsPreemptible(t *testing.T) {
+	if testing.Short() || runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("hashes 64 MiB, and needs GOMAXPROCS >= 2 to see a stalled GC")
+	}
+	// One Write, so an unbounded writeBlocks is a single call and the GC waits
+	// out the whole hash rather than one chunk of it.
+	buf := make([]byte, 64*1024*1024)
+
+	// Three rounds each, keeping the reading that most favours a pass: the best
+	// hash and the worst plain-Go loop. A loaded runner can stall any single
+	// measurement, but only unpreemptible code stalls every one of them.
+	got, hash := time.Duration(math.MaxInt64), time.Duration(0)
+	var floor time.Duration
+	for range 3 {
+		w, _ := gcWait(func() {
+			for _, b := range buf {
+				sink += uint64(b)
+			}
+		})
+		floor = max(floor, w)
+
+		w, e := gcWait(func() {
+			var d Digest
+			d.Reset()
+			d.Write(buf)
+			sink = d.Sum64()
+		})
+		if w < got {
+			got, hash = w, e
+		}
+	}
+
+	t.Logf("worst GC wait: %v of a %v Digest.Write, against %v on a plain Go loop", got, hash, floor)
+	if got > hash/4 && got > 4*floor {
+		t.Fatalf("a GC waited %v of a %v Digest.Write, against %v on a plain Go "+
+			"loop: writeBlocks is running unbounded", got, hash, floor)
 	}
 }
