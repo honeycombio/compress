@@ -1239,9 +1239,11 @@ main_loop:
 	MOVQ 8(AX), R13
 
 	// Copy literals
-	TESTQ R11, R11
-	JZ    check_offset
-	XORQ  R14, R14
+	MOVUPS (SI), X0
+	MOVUPS X0, (BX)
+	CMPQ   R11, $0x10
+	JBE    copy_1_end
+	MOVQ   $0x00000010, R14
 
 copy_1:
 	MOVUPS (SI)(R14*1), X0
@@ -1249,12 +1251,13 @@ copy_1:
 	ADDQ   $0x10, R14
 	CMPQ   R14, R11
 	JB     copy_1
-	ADDQ   R11, SI
-	ADDQ   R11, BX
-	ADDQ   R11, DI
+
+copy_1_end:
+	ADDQ R11, SI
+	ADDQ R11, BX
+	ADDQ R11, DI
 
 	// Malformed input if seq.mo > t+len(hist) || seq.mo > s.windowSize)
-check_offset:
 	LEAQ (DI)(R10*1), R11
 	CMPQ R12, R11
 	JG   error_match_off_too_big
@@ -1402,9 +1405,19 @@ copy_match:
 	JA   copy_overlapping_match
 
 	// Copy non-overlapping match
-	ADDQ R13, DI
-	MOVQ BX, R12
+	ADDQ   R13, DI
+	MOVUPS (R11), X0
+	MOVUPS X0, (BX)
+	CMPQ   R13, $0x10
+	JA     copy_2_long
+	ADDQ   R13, BX
+	JMP    handle_loop
+
+copy_2_long:
+	LEAQ 16(BX), R12
 	ADDQ R13, BX
+	ADDQ $0x10, R11
+	SUBQ $0x10, R13
 
 copy_2:
 	MOVUPS (R11), X0
@@ -2096,9 +2109,11 @@ sequenceDecs_decodeSync_amd64_match_len_ofs_ok:
 	JA   error_not_enough_space
 
 	// Copy literals
-	TESTQ CX, CX
-	JZ    check_offset
-	XORQ  R14, R14
+	MOVUPS (R11), X0
+	MOVUPS X0, (R10)
+	CMPQ   CX, $0x10
+	JBE    copy_1_end
+	MOVQ   $0x00000010, R14
 
 copy_1:
 	MOVUPS (R11)(R14*1), X0
@@ -2106,12 +2121,13 @@ copy_1:
 	ADDQ   $0x10, R14
 	CMPQ   R14, CX
 	JB     copy_1
-	ADDQ   CX, R11
-	ADDQ   CX, R10
-	ADDQ   CX, R12
+
+copy_1_end:
+	ADDQ CX, R11
+	ADDQ CX, R10
+	ADDQ CX, R12
 
 	// Malformed input if seq.mo > t+len(hist) || seq.mo > s.windowSize)
-check_offset:
 	MOVQ R12, CX
 	ADDQ 72(SP), CX
 	CMPQ R13, CX
@@ -2257,9 +2273,19 @@ copy_match:
 	JA   copy_overlapping_match
 
 	// Copy non-overlapping match
-	ADDQ AX, R12
-	MOVQ R10, R13
+	ADDQ   AX, R12
+	MOVUPS (CX), X0
+	MOVUPS X0, (R10)
+	CMPQ   AX, $0x10
+	JA     copy_2_long
+	ADDQ   AX, R10
+	JMP    handle_loop
+
+copy_2_long:
+	LEAQ 16(R10), R13
 	ADDQ AX, R10
+	ADDQ $0x10, CX
+	SUBQ $0x10, AX
 
 copy_2:
 	MOVUPS (CX), X0
@@ -2619,9 +2645,11 @@ sequenceDecs_decodeSync_bmi2_match_len_ofs_ok:
 	JA   error_not_enough_space
 
 	// Copy literals
-	TESTQ R12, R12
-	JZ    check_offset
-	XORQ  R14, R14
+	MOVUPS (R10), X0
+	MOVUPS X0, (R9)
+	CMPQ   R12, $0x10
+	JBE    copy_1_end
+	MOVQ   $0x00000010, R14
 
 copy_1:
 	MOVUPS (R10)(R14*1), X0
@@ -2629,12 +2657,13 @@ copy_1:
 	ADDQ   $0x10, R14
 	CMPQ   R14, R12
 	JB     copy_1
-	ADDQ   R12, R10
-	ADDQ   R12, R9
-	ADDQ   R12, R11
+
+copy_1_end:
+	ADDQ R12, R10
+	ADDQ R12, R9
+	ADDQ R12, R11
 
 	// Malformed input if seq.mo > t+len(hist) || seq.mo > s.windowSize)
-check_offset:
 	MOVQ R11, R12
 	ADDQ 72(SP), R12
 	CMPQ R13, R12
@@ -2780,9 +2809,19 @@ copy_match:
 	JA   copy_overlapping_match
 
 	// Copy non-overlapping match
-	ADDQ CX, R11
-	MOVQ R9, R13
+	ADDQ   CX, R11
+	MOVUPS (R12), X0
+	MOVUPS X0, (R9)
+	CMPQ   CX, $0x10
+	JA     copy_2_long
+	ADDQ   CX, R9
+	JMP    handle_loop
+
+copy_2_long:
+	LEAQ 16(R9), R13
 	ADDQ CX, R9
+	ADDQ $0x10, R12
+	SUBQ $0x10, CX
 
 copy_2:
 	MOVUPS (R12), X0

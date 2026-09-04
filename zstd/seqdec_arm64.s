@@ -650,9 +650,11 @@ main_loop:
 	MOVD 8(R0), R12
 
 	// Copy literals
-	TST  R10, R10
-	BEQ  check_offset
-	MOVD $0, R13
+	FMOVQ (R5), F0
+	FMOVQ F0, (R3)
+	CMP   $0x10, R10
+	BLS   copy_1_end
+	MOVD  $0x00000010, R13
 
 copy_1:
 	ADD   R13, R5, R15
@@ -662,12 +664,13 @@ copy_1:
 	ADD   $0x10, R13, R13
 	CMP   R10, R13
 	BLO   copy_1
-	ADD   R10, R5, R5
-	ADD   R10, R3, R3
-	ADD   R10, R6, R6
+
+copy_1_end:
+	ADD R10, R5, R5
+	ADD R10, R3, R3
+	ADD R10, R6, R6
 
 	// Malformed input if seq.mo > t+len(hist) || seq.mo > s.windowSize)
-check_offset:
 	ADD R9, R6, R10
 	CMP R10, R11
 	BGT error_match_off_too_big
@@ -833,9 +836,19 @@ copy_match:
 	BHI copy_overlapping_match
 
 	// Copy non-overlapping match
-	ADD  R12, R6, R6
-	MOVD R3, R11
-	ADD  R12, R3, R3
+	ADD   R12, R6, R6
+	FMOVQ (R10), F0
+	FMOVQ F0, (R3)
+	CMP   $0x10, R12
+	BHI   copy_2_long
+	ADD   R12, R3, R3
+	JMP   handle_loop
+
+copy_2_long:
+	ADD $16, R3, R11
+	ADD R12, R3, R3
+	ADD $0x10, R10, R10
+	SUB $0x10, R12, R12
 
 copy_2:
 	FMOVQ (R10), F0
@@ -1570,9 +1583,11 @@ sequenceDecs_decodeSync_amd64_match_len_ofs_ok:
 	BHI  error_not_enough_space
 
 	// Copy literals
-	TST  R1, R1
-	BEQ  check_offset
-	MOVD $0, R13
+	FMOVQ (R10), F0
+	FMOVQ F0, (R9)
+	CMP   $0x10, R1
+	BLS   copy_1_end
+	MOVD  $0x00000010, R13
 
 copy_1:
 	ADD   R13, R10, R15
@@ -1582,12 +1597,13 @@ copy_1:
 	ADD   $0x10, R13, R13
 	CMP   R1, R13
 	BLO   copy_1
-	ADD   R1, R10, R10
-	ADD   R1, R9, R9
-	ADD   R1, R11, R11
+
+copy_1_end:
+	ADD R1, R10, R10
+	ADD R1, R9, R9
+	ADD R1, R11, R11
 
 	// Malformed input if seq.mo > t+len(hist) || seq.mo > s.windowSize)
-check_offset:
 	MOVD R11, R1
 	MOVD 80(RSP), R16
 	ADD  R16, R1, R1
@@ -1753,9 +1769,19 @@ copy_match:
 	BHI copy_overlapping_match
 
 	// Copy non-overlapping match
-	ADD  R0, R11, R11
-	MOVD R9, R12
-	ADD  R0, R9, R9
+	ADD   R0, R11, R11
+	FMOVQ (R1), F0
+	FMOVQ F0, (R9)
+	CMP   $0x10, R0
+	BHI   copy_2_long
+	ADD   R0, R9, R9
+	JMP   handle_loop
+
+copy_2_long:
+	ADD $16, R9, R12
+	ADD R0, R9, R9
+	ADD $0x10, R1, R1
+	SUB $0x10, R0, R0
 
 copy_2:
 	FMOVQ (R1), F0
