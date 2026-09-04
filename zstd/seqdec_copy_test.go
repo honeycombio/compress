@@ -7,14 +7,22 @@ import (
 	"testing"
 )
 
-// TestDecoderShortSequenceCopies round-trips inputs whose sequences cluster at
-// the boundaries the assembly copy paths treat differently: literal runs of
-// 0, 16 and 17 bytes and matches of 16 and 17 bytes. The extended copies write
-// the first 16-byte block of every literal run and match unconditionally and
-// loop only past 16 bytes, so a bug there shows up as corruption at exactly
-// these lengths. Both the DecodeAll path (decodeSync) and the streaming path
-// (decode + executeSimple) are exercised; both use the extended copies when
-// the buffers carry compressedBlockOverAlloc slack, which they do here.
+// TestDecoderShortSequenceCopies round-trips inputs built so that their
+// sequences cluster at the boundaries the assembly copy paths treat
+// differently: literal runs of 0, 16 and 17 bytes and matches of 16 and 17
+// bytes. The extended copies write the first 16-byte block of every literal
+// run and match unconditionally and loop only past 16 bytes, so a bug there
+// shows up as corruption at exactly these lengths. The inputs are random
+// runs of the stated length between repeated words of the stated length; the
+// encoder decides the actual sequences, so the lengths cluster at rather than
+// equal the boundary. That the clustering is close enough is checked by
+// mutation: with the match tail threshold in the generator off by one, the
+// 17-byte-word cases fail with a CRC error.
+//
+// Both the DecodeAll path (decodeSync) and the streaming path (decode +
+// executeSimple) are exercised. Both allocate their buffers with
+// compressedBlockOverAlloc slack and so run the extended copies; the
+// selection itself is asserted by Test_seqdec_decodeSync on recorded blocks.
 func TestDecoderShortSequenceCopies(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	randomBytes := func(n int) []byte {
@@ -30,11 +38,11 @@ func TestDecoderShortSequenceCopies(t *testing.T) {
 		wordLens []int // lengths of the repeated words the encoder should match
 		litLens  []int // lengths of the random runs between words
 	}{
-		{name: "ll0-ml16", wordLens: []int{16}, litLens: []int{0}},
-		{name: "ll0-ml17", wordLens: []int{17}, litLens: []int{0}},
-		{name: "ll16-ml16", wordLens: []int{16}, litLens: []int{16}},
-		{name: "ll17-ml17", wordLens: []int{17}, litLens: []int{17}},
-		{name: "ll1-ml15", wordLens: []int{15}, litLens: []int{1}},
+		{name: "words16-lits0", wordLens: []int{16}, litLens: []int{0}},
+		{name: "words17-lits0", wordLens: []int{17}, litLens: []int{0}},
+		{name: "words16-lits16", wordLens: []int{16}, litLens: []int{16}},
+		{name: "words17-lits17", wordLens: []int{17}, litLens: []int{17}},
+		{name: "words15-lits1", wordLens: []int{15}, litLens: []int{1}},
 		{name: "mixed", wordLens: []int{4, 5, 8, 15, 16, 17, 31, 32, 33}, litLens: []int{0, 0, 0, 1, 2, 15, 16, 17, 32, 33}},
 	}
 	levels := []EncoderLevel{SpeedFastest, SpeedDefault, SpeedBetterCompression, SpeedBestCompression}
