@@ -7,6 +7,7 @@ package zstd
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"sync"
 
@@ -193,18 +194,30 @@ func (d *Decoder) Reset(r io.Reader) error {
 		}
 
 		dst, err := d.DecodeAll(b, dst)
-		if err == nil {
-			err = io.EOF
+		if !errors.Is(err, ErrDecoderSizeExceeded) {
+			if err == nil {
+				err = io.EOF
+			}
+			// Save output buffer
+			d.syncStream.dstBuf = dst
+			d.current.b = dst
+			d.current.err = err
+			d.current.flushed = true
+			if debugDecoder {
+				println("sync decode to", len(dst), "bytes, err:", err)
+			}
+			return nil
 		}
-		// Save output buffer
-		d.syncStream.dstBuf = dst
-		d.current.b = dst
-		d.current.err = err
-		d.current.flushed = true
+		// The output does not fit WithDecoderMaxMemory, which caps the total
+		// decoded size when decoding in memory. A Reader follows the
+		// streaming contract, where the option caps the window instead, so
+		// decode this input as a stream after all; the shortcut has not
+		// consumed the reader. Drop the oversized buffer rather than keep it
+		// for reuse.
 		if debugDecoder {
-			println("sync decode to", len(dst), "bytes, err:", err)
+			println("sync decode exceeded max memory after", len(dst), "bytes; streaming instead")
 		}
-		return nil
+		d.syncStream.dstBuf = nil
 	}
 	// Remove current block.
 	d.stashDecoder()

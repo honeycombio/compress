@@ -2337,3 +2337,67 @@ func TestDecoderDictDeleteMultiple(t *testing.T) {
 		t.Error("dict 200 should still exist")
 	}
 }
+
+// TestDecoderBufferShortcutFallsBackToStreaming covers #1206. A Reader over a
+// source with Bytes and Len shorter than WithDecodeBuffersBelow is decoded in
+// memory, where WithDecoderMaxMemory caps the total decoded size; a Reader is
+// documented with the streaming contract, where the option caps the window.
+// When the in-memory decode exceeds the cap, Reset must fall back to streaming
+// so the Reader behaves the same as over a plain io.Reader.
+func TestDecoderBufferShortcutFallsBackToStreaming(t *testing.T) {
+	// 4 MiB of zeros with a 64 KiB window compresses to a few hundred bytes,
+	// far below the buffers-below threshold, and streams back within a
+	// 1 MiB window cap while exceeding a 1 MiB total-size cap.
+	input := make([]byte, 4<<20)
+	var buf bytes.Buffer
+	enc, err := NewWriter(&buf, WithWindowSize(64<<10), WithEncoderCRC(false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Write(input); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	compressed := buf.Bytes()
+	if len(compressed) >= 128<<10 {
+		t.Fatalf("compressed input is %d bytes, not below the buffers-below threshold", len(compressed))
+	}
+	const limit = 1 << 20
+
+	// In-memory decoding is documented to cap the total decoded size.
+	dec, err := NewReader(nil, WithDecoderMaxMemory(limit))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dec.DecodeAll(compressed, nil); !errors.Is(err, ErrDecoderSizeExceeded) {
+		t.Fatalf("DecodeAll: got %v, want %v", err, ErrDecoderSizeExceeded)
+	}
+	dec.Close()
+
+	// A Reader must succeed regardless of whether the source takes the
+	// in-memory shortcut.
+	for _, tc := range []struct {
+		name string
+		r    io.Reader
+	}{
+		{"bytes.Buffer (shortcut)", bytes.NewBuffer(compressed)},
+		{"plain reader (streaming)", struct{ io.Reader }{bytes.NewReader(compressed)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dec, err := NewReader(tc.r, WithDecoderMaxMemory(limit))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dec.Close()
+			got, err := io.ReadAll(dec)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if !bytes.Equal(got, input) {
+				t.Fatalf("output mismatch: got %d bytes, want %d", len(got), len(input))
+			}
+		})
+	}
+}
