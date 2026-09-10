@@ -5,6 +5,13 @@ package zstd
 import (
 	"fmt"
 	"io"
+	"math"
+)
+
+// See seqdec_arm64.go; the pure Go decoder has neither path.
+var (
+	decodeTwoPassMinWindow   = math.MaxInt
+	executePrefetchMinWindow = math.MaxInt
 )
 
 // decode sequences from the stream with the provided history but without dictionary.
