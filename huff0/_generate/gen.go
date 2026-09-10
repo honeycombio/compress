@@ -71,6 +71,19 @@ const (
 	fast4bSymbols = 14 // tablelog <= 4: 14*4 = 56
 )
 
+// outputBoundShift returns the shift that divides an output byte budget by
+// the next power of two at or above nSyms, a cheap conservative bound on
+// the iterations a batch may run (5 and 7 -> 8, 14 -> 16). It panics if
+// the shift would not cover nSyms, since the loops write nSyms bytes per
+// iteration without further checks.
+func outputBoundShift(nSyms int) int {
+	shift := mbits.Len(uint(nSyms - 1))
+	if nSyms > 1<<shift {
+		panic("output bound does not cover nSyms")
+	}
+	return shift
+}
+
 // generateProcedure emits the Decompress4X main loop for one symbols-per-
 // reload count. It follows zstd's HUF_decompress4X1 fast loop.
 //
@@ -151,13 +164,8 @@ func (d decompress4x) generateProcedure(name string, nSyms int) {
 	{
 		// The outer loop only re-checks bounds after a whole batch of
 		// iterations, and each iteration writes nSyms bytes per stream, so
-		// the batch must satisfy iters*nSyms <= limit-op0. Dividing the byte
-		// budget by the next power of two at or above nSyms is a cheap
-		// conservative bound (5 and 7 -> 8, 14 -> 16).
-		outShift := mbits.Len(uint(nSyms - 1))
-		if nSyms > 1<<outShift {
-			panic("output bound does not cover nSyms")
-		}
+		// the batch must satisfy iters*nSyms <= limit-op0.
+		outShift := outputBoundShift(nSyms)
 		Commentf("Iterations allowed by the output: (limit - op0) / %d", 1<<outShift)
 		iters := GP64()
 		Load(ctx.Field("limit"), iters)
@@ -349,10 +357,7 @@ func (d decompress1x) generateProcedure(name string, nSyms int) {
 	inner := GP64()
 	Label("outer_loop")
 	{
-		outShift := mbits.Len(uint(nSyms - 1))
-		if nSyms > 1<<outShift {
-			panic("output bound does not cover nSyms")
-		}
+		outShift := outputBoundShift(nSyms)
 		Commentf("Iterations allowed by the output: (limit - op) / %d", 1<<outShift)
 		iters := GP64()
 		MOVQ(limit, iters)
