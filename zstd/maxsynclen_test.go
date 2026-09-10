@@ -9,13 +9,15 @@ import (
 
 // TestMaxSyncLenTracksEveryBlockType walks frames block by block the way
 // runDecoder does and checks, after each block, that maxSyncLen still equals
-// the number of bytes the frame has yet to produce. Compressed blocks were
-// accounted for; raw and RLE blocks were not, so a frame that started with
+// the number of bytes the frame has yet to produce. Compressed blocks with
+// sequences were accounted for; raw blocks, RLE blocks and compressed blocks
+// holding only literals were not, so a frame that started with
 // incompressible data overstated its remaining size from then on, and
 // useSafeDecodeSync chose the bounds-exact copies for every compressed block
 // after the raw ones.
 //
-// The encoder never emits RLE blocks, so that case is a hand-built frame.
+// The encoder never emits RLE blocks or literal-only compressed blocks, so
+// those cases are hand-built frames.
 func TestMaxSyncLenTracksEveryBlockType(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	random := make([]byte, 256<<10)
@@ -47,6 +49,19 @@ func TestMaxSyncLenTracksEveryBlockType(t *testing.T) {
 	handmade = append(handmade, 'x')
 	rleWant := append(append([]byte(nil), random[:half]...), bytes.Repeat([]byte{'x'}, half)...)
 
+	// A single-segment frame holding one raw block and one compressed block
+	// that carries 20 raw literals and no sequences.
+	lits := []byte("twenty literal bytes")
+	litOnly := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x60}
+	litOnly = binary.LittleEndian.AppendUint16(litOnly, uint16(half+len(lits))-256)
+	litOnly = append(litOnly, testBlockHeader(half, blockTypeRaw, false)...)
+	litOnly = append(litOnly, random[:half]...)
+	litOnly = append(litOnly, testBlockHeader(1+len(lits)+1, blockTypeCompressed, true)...)
+	litOnly = append(litOnly, byte(len(lits))<<3) // raw literals, 1-byte size format
+	litOnly = append(litOnly, lits...)
+	litOnly = append(litOnly, 0) // zero sequences
+	litOnlyWant := append(append([]byte(nil), random[:half]...), lits...)
+
 	cases := []struct {
 		name  string
 		comp  []byte
@@ -55,6 +70,7 @@ func TestMaxSyncLenTracksEveryBlockType(t *testing.T) {
 	}{
 		{"raw then compressed", encoded, text, []blockType{blockTypeRaw, blockTypeCompressed}},
 		{"raw then RLE", handmade, rleWant, []blockType{blockTypeRaw, blockTypeRLE}},
+		{"raw then literals only", litOnly, litOnlyWant, []blockType{blockTypeRaw, blockTypeCompressed}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -68,6 +84,7 @@ func TestMaxSyncLenTracksEveryBlockType(t *testing.T) {
 	}
 }
 
+// testBlockHeader encodes a zstd block header: last flag, type, and size.
 func testBlockHeader(size int, bt blockType, last bool) []byte {
 	v := uint32(size)<<3 | uint32(bt)<<1
 	if last {

@@ -489,6 +489,7 @@ func (b *blockDec) decodeCompressed(hist *history) error {
 	}
 	if hist.decoders.nSeqs == 0 {
 		b.dst = append(b.dst, hist.decoders.literals...)
+		hist.decoders.consumeSyncLen(len(hist.decoders.literals))
 		return nil
 	}
 	before := len(hist.decoders.out)

@@ -102,10 +102,11 @@ func (s *sequenceDecs) initialize(br *bitReader, hist *history, out []byte) erro
 // consumeSyncLen accounts for n bytes of frame output produced outside
 // decodeSync. maxSyncLen bounds how much the frame may still produce and
 // decodeSyncSimple compares it with the output buffer's slack to decide
-// whether the extended 16-byte copies are safe. decodeCompressed subtracts
-// its own output; raw and RLE blocks did not, so a frame that opened with a
-// raw block overstated its remaining size for every block after it and ran
-// the bounds-exact copies for the rest of the frame.
+// whether the extended 16-byte copies are safe. Blocks with sequences
+// subtracted their output; raw blocks, RLE blocks and compressed blocks
+// holding only literals did not, so a frame that opened with a raw block
+// overstated its remaining size for every block after it and ran the
+// bounds-exact copies for the rest of the frame.
 //
 // Zero means "no bound" and selects the conservative paths, so a block that
 // meets or exceeds the bound lands there; the frame-size checks in
