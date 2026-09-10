@@ -3,6 +3,7 @@ package zstd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,13 +31,20 @@ func BenchmarkStep0Decode(b *testing.B) {
 	if dir == "" {
 		b.Skip("set STEP0_CORPUS_DIR (run TestStep0GenCorpus first)")
 	}
-	for _, name := range []string{"storefwd", "l2hit", "dram"} {
+	// STEP1_BUCKETS selects the Step 1 corpus instead, so the one-pass
+	// DecodeAll path can be compared with BenchmarkStep1Execute's two-pass
+	// walk on the same frames.
+	buckets := "storefwd,l2hit,dram"
+	if v := os.Getenv("STEP1_BUCKETS"); v != "" {
+		buckets = v
+	}
+	for _, name := range strings.Split(buckets, ",") {
 		comp, err := os.ReadFile(filepath.Join(dir, name+".zst"))
 		if err != nil {
 			b.Fatalf("%s: %v (did TestStep0GenCorpus run first?)", name, err)
 		}
 		b.Run(name, func(b *testing.B) {
-			dec, err := NewReader(nil, WithDecoderConcurrency(1))
+			dec, err := NewReader(nil, WithDecoderConcurrency(1), IgnoreChecksum(os.Getenv("STEP1_NOCRC") != ""))
 			if err != nil {
 				b.Fatal(err)
 			}

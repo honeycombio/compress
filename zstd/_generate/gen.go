@@ -48,6 +48,12 @@ const compressedBlockOverAlloc = 16
 // size of struct seqVals
 const seqValsSize = 24
 
+// prefetchDist is Step 1 of the match-prefetch experiment (see
+// zstd/prefetch_step1_test.go): the two-pass executeSimple loop prefetches
+// the match source this many sequences ahead of the copy that needs it.
+// 0, the default and what the go:generate line uses, emits today's code.
+var prefetchDist = flag.Int("prefetch-dist", 0, "executeSimple: prefetch the match source this many sequences ahead (0 = off)")
+
 func main() {
 	flag.Parse()
 
@@ -71,8 +77,9 @@ func main() {
 	o.genDecodeSeqAsm("sequenceDecs_decode_56_bmi2")
 
 	exec := executeSimple{
-		useSeqs: true,
-		safeMem: false,
+		useSeqs:      true,
+		safeMem:      false,
+		prefetchDist: *prefetchDist,
 	}
 	exec.generateProcedure("sequenceDecs_executeSimple_amd64")
 	exec.safeMem = true
@@ -1018,6 +1025,9 @@ func (o options) adjustOffsetInMemory(name string, moP, llP Mem, offsetB reg.GPV
 type executeSimple struct {
 	useSeqs bool // Generate code that uses the `seqs` auxiliary table
 	safeMem bool
+	// prefetchDist > 0 (useSeqs only) prefetches the match source of the
+	// sequence this many entries ahead; see the -prefetch-dist flag.
+	prefetchDist int
 }
 
 func (e executeSimple) generateProcedure(name string) {
@@ -1036,6 +1046,40 @@ func (e executeSimple) generateProcedure(name string) {
 	histBase := GP64()
 	histLen := GP64()
 
+	// Step 1 of the match-prefetch experiment. seqVals already holds every
+	// sequence of the block, so a running sum of ll+ml over the next
+	// prefetchDist entries names the output position each future match is
+	// copied to, and that position minus mo names its source. Touch the
+	// source (both halves of a possibly line-straddling copy) prefetchDist
+	// sequences before the copy needs it. Only matches into the decoded
+	// frame are addressed correctly: one reaching into a separate `hist`
+	// buffer prefetches garbage below out, which a prefetch tolerates.
+	//
+	// Register budget: the copy code already peaks at the full register
+	// file and avo has no spilling, so any new loop-carried register is a
+	// generate-time failure (seen with three, two and one). Nothing new is
+	// loop-carried in a register. The prefetch cursor always sits exactly
+	// 24*prefetchDist bytes ahead of seqsBase, so it is a displacement; the
+	// loop-invariant end pointer and the running output position live in
+	// stack slots, reloaded (and the latter stored back) by the helper, three
+	// L1 accesses per sequence.
+	//
+	// A match whose offset reaches past the start of out lives in the
+	// separate history buffer (streaming decode; DecodeAll keeps the whole
+	// frame in out and never takes this path). Its source is histEnd -
+	// (mo - pos), which is (q - mo) + (histEnd - outStart) for q the match's
+	// absolute output pointer: a fixed offset from the in-out address, so
+	// the helper redirects with one compare and one add. Left as garbage
+	// addresses below out, those prefetches cost a page walk each and made
+	// the small-block seqs.zip benchmark 70% slower.
+	var seqsEndSlot, pfOutSlot, outStartSlot, histSkewSlot Mem
+	if e.prefetchDist > 0 {
+		seqsEndSlot = AllocLocal(8)
+		pfOutSlot = AllocLocal(8)
+		outStartSlot = AllocLocal(8)
+		histSkewSlot = AllocLocal(8)
+	}
+
 	{
 		ctx := Dereference(Param("ctx"))
 		tmp := GP64()
@@ -1043,6 +1087,14 @@ func (e executeSimple) generateProcedure(name string) {
 		TESTQ(seqsLen, seqsLen)
 		JZ(LabelRef("empty_seqs"))
 		Load(ctx.Field("seqs").Base(), seqsBase)
+		if e.prefetchDist > 0 {
+			Comment("seqsEnd = seqsBase + 24 * len(seqs)")
+			seqsEnd := GP64()
+			LEAQ(Mem{Base: seqsLen, Index: seqsLen, Scale: 2}, seqsEnd) // * 3
+			SHLQ(U8(3), seqsEnd)                                        // * 8
+			ADDQ(seqsBase, seqsEnd)
+			MOVQ(seqsEnd, seqsEndSlot)
+		}
 		Load(ctx.Field("seqIndex"), seqIndex)
 		Load(ctx.Field("out").Base(), outBase)
 		Load(ctx.Field("literals").Base(), literals)
@@ -1062,7 +1114,61 @@ func (e executeSimple) generateProcedure(name string) {
 		ADDQ(outPosition, outBase)
 	}
 
+	var prefetch func(n int)
+	if e.prefetchDist > 0 {
+		MOVQ(outBase, pfOutSlot)
+		{
+			t := GP64()
+			MOVQ(outBase, t)
+			SUBQ(outPosition, t) // &out[0]
+			MOVQ(t, outStartSlot)
+			NEGQ(t)
+			ADDQ(histBase, t) // histEnd - &out[0]
+			MOVQ(t, histSkewSlot)
+		}
+		// prefetch touches the source of the sequence n entries past
+		// seqsBase, if there is one, and advances the pending output
+		// position past it.
+		prefetch = func(n int) {
+			skip := fmt.Sprintf("prefetch_skip_%d", n)
+			seq := Mem{Base: seqsBase, Disp: n * seqValsSize}
+			v := GP64()
+			t := GP64()
+			MOVQ(seqsEndSlot, v)
+			LEAQ(seq, t)
+			CMPQ(t, v)
+			JAE(LabelRef(skip))
+			inOut := fmt.Sprintf("prefetch_in_out_%d", n)
+			w := GP64()
+			MOVQ(pfOutSlot, t)
+			MOVQ(seq.Offset(0*8), v) // ll
+			ADDQ(v, t)               // t = the match's output pointer
+			MOVQ(t, w)
+			MOVQ(seq.Offset(2*8), v) // mo
+			SUBQ(v, w)               // w = its source, if inside out
+			MOVQ(outStartSlot, v)
+			CMPQ(w, v)
+			JAE(LabelRef(inOut))
+			MOVQ(histSkewSlot, v)
+			ADDQ(v, w) // redirect into the history buffer
+			Label(inOut)
+			PREFETCHT0(Mem{Base: w})
+			PREFETCHT0(Mem{Base: w, Disp: 64})
+			MOVQ(seq.Offset(1*8), v) // ml
+			ADDQ(v, t)               // past the match
+			MOVQ(t, pfOutSlot)
+			Label(skip)
+		}
+		Comment("Prime the prefetch window")
+		for n := 0; n < e.prefetchDist; n++ {
+			prefetch(n)
+		}
+	}
+
 	Label("main_loop")
+	if prefetch != nil {
+		prefetch(e.prefetchDist)
+	}
 
 	moPtr := Mem{Base: seqsBase, Disp: 2 * 8}
 	mlPtr := Mem{Base: seqsBase, Disp: 1 * 8}
