@@ -2513,7 +2513,7 @@ done:
 	RET
 
 // func decompress1x_main_loop_amd64(ctx *decompress1xContext)
-// Requires: BMI, CMOV
+// Requires: CMOV
 TEXT ·decompress1x_main_loop_amd64(SB), $0-8
 	MOVQ ctx+0(FP), AX
 
@@ -2525,12 +2525,9 @@ TEXT ·decompress1x_main_loop_amd64(SB), $0-8
 	ADDQ    SI, DI
 	MOVQ    56(AX), R8
 	MOVQ    48(AX), R9
-
-	// Convert the bit reader to sentinel form: bits = value | 1<<bitsRead
 	MOVQ    (AX), CX
 	MOVQ    32(CX), R10
-	MOVBQZX 40(CX), CX
-	BTSQ    CX, R10
+	MOVBQZX 40(CX), R11
 
 outer_loop:
 	// Iterations allowed by the output: (limit - op) / 8
@@ -2539,91 +2536,102 @@ outer_loop:
 	JLE  done
 	SHRQ $0x03, CX
 
-	// Iterations allowed by the input: a reload backs the pointer up by at most 7 bytes
-	// (whatever nSyms is), so every read stays inside the stream while ip stays above ilowest.
-	MOVQ    R8, R11
-	SUBQ    R9, R11
-	SHRQ    $0x03, R11
-	CMPQ    R11, CX
-	CMOVQCS R11, CX
+	// Iterations allowed by the input: a refill reads the 8 bytes below the window and
+	// moves it down by at most 7, so every read stays inside the stream while ip stays
+	// at least 8 above ilowest.
+	MOVQ    R8, R12
+	SUBQ    R9, R12
+	SHRQ    $0x03, R12
+	CMPQ    R12, CX
+	CMOVQCS R12, CX
 	TESTQ   CX, CX
 	JZ      done
-	IMUL3Q  $0x05, CX, R11
-	ADDQ    SI, R11
+	IMUL3Q  $0x05, CX, R12
+	ADDQ    SI, R12
 
 inner_loop:
 	// symbol 0
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, (SI)
 
 	// symbol 1
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 1(SI)
 
 	// symbol 2
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 2(SI)
 
 	// symbol 3
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 3(SI)
 
 	// symbol 4
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 4(SI)
 
-	// Reload the bit container
-	TZCNTQ R10, R10
-	MOVQ   R10, CX
-	ANDQ   $0x07, CX
-	SHRQ   $0x03, R10
-	SUBQ   R10, R8
-	MOVQ   (R8), R10
-	ORQ    $0x01, R10
-	SHLQ   CL, R10
-	ADDQ   $0x05, SI
-	CMPQ   SI, R11
-	JB     inner_loop
-	JMP    outer_loop
+	// Refill the whole bytes consumed from below the window
+	MOVQ R11, R13
+	ANDQ $0x38, R13
+	MOVQ -8(R8), R14
+	SHRQ $0x01, R14
+	ANDQ $0x07, R11
+	MOVQ R13, CX
+	XORQ $0x3f, CX
+	SHRQ CL, R14
+	MOVQ R11, CX
+	SHLQ CL, R14
+	ORQ  R14, R10
+	SHRQ $0x03, R13
+	SUBQ R13, R8
+	ADDQ $0x05, SI
+	CMPQ SI, R12
+	JB   inner_loop
+	JMP  outer_loop
 
 done:
-	// Hand the state back: off = ip - in, value = the sentinel-form container.
-	// bitReaderShifted.restoreFromAsm normalizes both.
+	// Hand the state back in the Go bit reader's own form: off = ip - in, value, bitsRead.
 	MOVQ (AX), CX
 	SUBQ (CX), R8
 	MOVQ R8, 24(CX)
 	MOVQ R10, 32(CX)
+	MOVB R11, 40(CX)
 	SUBQ 16(AX), SI
 	MOVQ SI, 40(AX)
 	RET
 
 // func decompress1x_8b_main_loop_amd64(ctx *decompress1xContext)
-// Requires: BMI, CMOV
+// Requires: CMOV
 TEXT ·decompress1x_8b_main_loop_amd64(SB), $0-8
 	MOVQ ctx+0(FP), AX
 
@@ -2635,12 +2643,9 @@ TEXT ·decompress1x_8b_main_loop_amd64(SB), $0-8
 	ADDQ    SI, DI
 	MOVQ    56(AX), R8
 	MOVQ    48(AX), R9
-
-	// Convert the bit reader to sentinel form: bits = value | 1<<bitsRead
 	MOVQ    (AX), CX
 	MOVQ    32(CX), R10
-	MOVBQZX 40(CX), CX
-	BTSQ    CX, R10
+	MOVBQZX 40(CX), R11
 
 outer_loop:
 	// Iterations allowed by the output: (limit - op) / 8
@@ -2649,109 +2654,122 @@ outer_loop:
 	JLE  done
 	SHRQ $0x03, CX
 
-	// Iterations allowed by the input: a reload backs the pointer up by at most 7 bytes
-	// (whatever nSyms is), so every read stays inside the stream while ip stays above ilowest.
-	MOVQ    R8, R11
-	SUBQ    R9, R11
-	SHRQ    $0x03, R11
-	CMPQ    R11, CX
-	CMOVQCS R11, CX
+	// Iterations allowed by the input: a refill reads the 8 bytes below the window and
+	// moves it down by at most 7, so every read stays inside the stream while ip stays
+	// at least 8 above ilowest.
+	MOVQ    R8, R12
+	SUBQ    R9, R12
+	SHRQ    $0x03, R12
+	CMPQ    R12, CX
+	CMOVQCS R12, CX
 	TESTQ   CX, CX
 	JZ      done
-	IMUL3Q  $0x07, CX, R11
-	ADDQ    SI, R11
+	IMUL3Q  $0x07, CX, R12
+	ADDQ    SI, R12
 
 inner_loop:
 	// symbol 0
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, (SI)
 
 	// symbol 1
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 1(SI)
 
 	// symbol 2
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 2(SI)
 
 	// symbol 3
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 3(SI)
 
 	// symbol 4
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 4(SI)
 
 	// symbol 5
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 5(SI)
 
 	// symbol 6
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 6(SI)
 
-	// Reload the bit container
-	TZCNTQ R10, R10
-	MOVQ   R10, CX
-	ANDQ   $0x07, CX
-	SHRQ   $0x03, R10
-	SUBQ   R10, R8
-	MOVQ   (R8), R10
-	ORQ    $0x01, R10
-	SHLQ   CL, R10
-	ADDQ   $0x07, SI
-	CMPQ   SI, R11
-	JB     inner_loop
-	JMP    outer_loop
+	// Refill the whole bytes consumed from below the window
+	MOVQ R11, R13
+	ANDQ $0x38, R13
+	MOVQ -8(R8), R14
+	SHRQ $0x01, R14
+	ANDQ $0x07, R11
+	MOVQ R13, CX
+	XORQ $0x3f, CX
+	SHRQ CL, R14
+	MOVQ R11, CX
+	SHLQ CL, R14
+	ORQ  R14, R10
+	SHRQ $0x03, R13
+	SUBQ R13, R8
+	ADDQ $0x07, SI
+	CMPQ SI, R12
+	JB   inner_loop
+	JMP  outer_loop
 
 done:
-	// Hand the state back: off = ip - in, value = the sentinel-form container.
-	// bitReaderShifted.restoreFromAsm normalizes both.
+	// Hand the state back in the Go bit reader's own form: off = ip - in, value, bitsRead.
 	MOVQ (AX), CX
 	SUBQ (CX), R8
 	MOVQ R8, 24(CX)
 	MOVQ R10, 32(CX)
+	MOVB R11, 40(CX)
 	SUBQ 16(AX), SI
 	MOVQ SI, 40(AX)
 	RET
 
 // func decompress1x_4b_main_loop_amd64(ctx *decompress1xContext)
-// Requires: BMI, CMOV
+// Requires: CMOV
 TEXT ·decompress1x_4b_main_loop_amd64(SB), $0-8
 	MOVQ ctx+0(FP), AX
 
@@ -2763,12 +2781,9 @@ TEXT ·decompress1x_4b_main_loop_amd64(SB), $0-8
 	ADDQ    SI, DI
 	MOVQ    56(AX), R8
 	MOVQ    48(AX), R9
-
-	// Convert the bit reader to sentinel form: bits = value | 1<<bitsRead
 	MOVQ    (AX), CX
 	MOVQ    32(CX), R10
-	MOVBQZX 40(CX), CX
-	BTSQ    CX, R10
+	MOVBQZX 40(CX), R11
 
 outer_loop:
 	// Iterations allowed by the output: (limit - op) / 16
@@ -2777,172 +2792,192 @@ outer_loop:
 	JLE  done
 	SHRQ $0x04, CX
 
-	// Iterations allowed by the input: a reload backs the pointer up by at most 7 bytes
-	// (whatever nSyms is), so every read stays inside the stream while ip stays above ilowest.
-	MOVQ    R8, R11
-	SUBQ    R9, R11
-	SHRQ    $0x03, R11
-	CMPQ    R11, CX
-	CMOVQCS R11, CX
+	// Iterations allowed by the input: a refill reads the 8 bytes below the window and
+	// moves it down by at most 7, so every read stays inside the stream while ip stays
+	// at least 8 above ilowest.
+	MOVQ    R8, R12
+	SUBQ    R9, R12
+	SHRQ    $0x03, R12
+	CMPQ    R12, CX
+	CMOVQCS R12, CX
 	TESTQ   CX, CX
 	JZ      done
-	IMUL3Q  $0x0e, CX, R11
-	ADDQ    SI, R11
+	IMUL3Q  $0x0e, CX, R12
+	ADDQ    SI, R12
 
 inner_loop:
 	// symbol 0
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, (SI)
 
 	// symbol 1
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 1(SI)
 
 	// symbol 2
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 2(SI)
 
 	// symbol 3
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 3(SI)
 
 	// symbol 4
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 4(SI)
 
 	// symbol 5
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 5(SI)
 
 	// symbol 6
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 6(SI)
 
 	// symbol 7
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 7(SI)
 
 	// symbol 8
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 8(SI)
 
 	// symbol 9
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 9(SI)
 
 	// symbol 10
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 10(SI)
 
 	// symbol 11
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 11(SI)
 
 	// symbol 12
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 12(SI)
 
 	// symbol 13
 	MOVQ    DX, CX
-	MOVQ    R10, R12
-	SHRQ    CL, R12
-	MOVWQZX (BX)(R12*2), CX
+	MOVQ    R10, R13
+	SHRQ    CL, R13
+	MOVWQZX (BX)(R13*2), CX
 	SHLQ    CL, R10
+	ADDQ    CX, R11
 	SHRQ    $0x08, CX
 	MOVB    CL, 13(SI)
 
-	// Reload the bit container
-	TZCNTQ R10, R10
-	MOVQ   R10, CX
-	ANDQ   $0x07, CX
-	SHRQ   $0x03, R10
-	SUBQ   R10, R8
-	MOVQ   (R8), R10
-	ORQ    $0x01, R10
-	SHLQ   CL, R10
-	ADDQ   $0x0e, SI
-	CMPQ   SI, R11
-	JB     inner_loop
-	JMP    outer_loop
+	// Refill the whole bytes consumed from below the window
+	MOVQ R11, R13
+	ANDQ $0x38, R13
+	MOVQ -8(R8), R14
+	SHRQ $0x01, R14
+	ANDQ $0x07, R11
+	MOVQ R13, CX
+	XORQ $0x3f, CX
+	SHRQ CL, R14
+	MOVQ R11, CX
+	SHLQ CL, R14
+	ORQ  R14, R10
+	SHRQ $0x03, R13
+	SUBQ R13, R8
+	ADDQ $0x0e, SI
+	CMPQ SI, R12
+	JB   inner_loop
+	JMP  outer_loop
 
 done:
-	// Hand the state back: off = ip - in, value = the sentinel-form container.
-	// bitReaderShifted.restoreFromAsm normalizes both.
+	// Hand the state back in the Go bit reader's own form: off = ip - in, value, bitsRead.
 	MOVQ (AX), CX
 	SUBQ (CX), R8
 	MOVQ R8, 24(CX)
 	MOVQ R10, 32(CX)
+	MOVB R11, 40(CX)
 	SUBQ 16(AX), SI
 	MOVQ SI, 40(AX)
 	RET
 
 // func decompress1x_main_loop_bmi2(ctx *decompress1xContext)
-// Requires: BMI, BMI2, CMOV
+// Requires: BMI2, CMOV
 TEXT ·decompress1x_main_loop_bmi2(SB), $0-8
 	MOVQ ctx+0(FP), AX
 
@@ -2954,95 +2989,102 @@ TEXT ·decompress1x_main_loop_bmi2(SB), $0-8
 	ADDQ    BX, SI
 	MOVQ    56(AX), DI
 	MOVQ    48(AX), R8
-
-	// Convert the bit reader to sentinel form: bits = value | 1<<bitsRead
 	MOVQ    (AX), R10
 	MOVQ    32(R10), R9
 	MOVBQZX 40(R10), R10
-	BTSQ    R10, R9
 
 outer_loop:
 	// Iterations allowed by the output: (limit - op) / 8
-	MOVQ SI, R10
-	SUBQ BX, R10
+	MOVQ SI, R11
+	SUBQ BX, R11
 	JLE  done
-	SHRQ $0x03, R10
+	SHRQ $0x03, R11
 
-	// Iterations allowed by the input: a reload backs the pointer up by at most 7 bytes
-	// (whatever nSyms is), so every read stays inside the stream while ip stays above ilowest.
-	MOVQ    DI, R11
-	SUBQ    R8, R11
-	SHRQ    $0x03, R11
-	CMPQ    R11, R10
-	CMOVQCS R11, R10
-	TESTQ   R10, R10
+	// Iterations allowed by the input: a refill reads the 8 bytes below the window and
+	// moves it down by at most 7, so every read stays inside the stream while ip stays
+	// at least 8 above ilowest.
+	MOVQ    DI, R12
+	SUBQ    R8, R12
+	SHRQ    $0x03, R12
+	CMPQ    R12, R11
+	CMOVQCS R12, R11
+	TESTQ   R11, R11
 	JZ      done
-	IMUL3Q  $0x05, R10, R10
-	ADDQ    BX, R10
+	IMUL3Q  $0x05, R11, R11
+	ADDQ    BX, R11
 
 inner_loop:
 	// symbol 0
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, (BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, (BX)
 
 	// symbol 1
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 1(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 1(BX)
 
 	// symbol 2
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 2(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 2(BX)
 
 	// symbol 3
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 3(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 3(BX)
 
 	// symbol 4
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 4(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 4(BX)
 
-	// Reload the bit container
-	TZCNTQ R9, R9
-	MOVQ   R9, R11
-	ANDQ   $0x07, R11
-	SHRQ   $0x03, R9
-	SUBQ   R9, DI
-	MOVQ   (DI), R9
-	ORQ    $0x01, R9
-	SHLXQ  R11, R9, R9
-	ADDQ   $0x05, BX
-	CMPQ   BX, R10
-	JB     inner_loop
-	JMP    outer_loop
+	// Refill the whole bytes consumed from below the window
+	MOVQ  R10, R12
+	ANDQ  $0x38, R12
+	MOVQ  -8(DI), R13
+	SHRQ  $0x01, R13
+	ANDQ  $0x07, R10
+	MOVQ  R12, R14
+	XORQ  $0x3f, R14
+	SHRXQ R14, R13, R13
+	SHLXQ R10, R13, R13
+	ORQ   R13, R9
+	SHRQ  $0x03, R12
+	SUBQ  R12, DI
+	ADDQ  $0x05, BX
+	CMPQ  BX, R11
+	JB    inner_loop
+	JMP   outer_loop
 
 done:
-	// Hand the state back: off = ip - in, value = the sentinel-form container.
-	// bitReaderShifted.restoreFromAsm normalizes both.
+	// Hand the state back in the Go bit reader's own form: off = ip - in, value, bitsRead.
 	MOVQ (AX), CX
 	SUBQ (CX), DI
 	MOVQ DI, 24(CX)
 	MOVQ R9, 32(CX)
+	MOVB R10, 40(CX)
 	SUBQ 16(AX), BX
 	MOVQ BX, 40(AX)
 	RET
 
 // func decompress1x_8b_main_loop_bmi2(ctx *decompress1xContext)
-// Requires: BMI, BMI2, CMOV
+// Requires: BMI2, CMOV
 TEXT ·decompress1x_8b_main_loop_bmi2(SB), $0-8
 	MOVQ ctx+0(FP), AX
 
@@ -3054,109 +3096,118 @@ TEXT ·decompress1x_8b_main_loop_bmi2(SB), $0-8
 	ADDQ    BX, SI
 	MOVQ    56(AX), DI
 	MOVQ    48(AX), R8
-
-	// Convert the bit reader to sentinel form: bits = value | 1<<bitsRead
 	MOVQ    (AX), R10
 	MOVQ    32(R10), R9
 	MOVBQZX 40(R10), R10
-	BTSQ    R10, R9
 
 outer_loop:
 	// Iterations allowed by the output: (limit - op) / 8
-	MOVQ SI, R10
-	SUBQ BX, R10
+	MOVQ SI, R11
+	SUBQ BX, R11
 	JLE  done
-	SHRQ $0x03, R10
+	SHRQ $0x03, R11
 
-	// Iterations allowed by the input: a reload backs the pointer up by at most 7 bytes
-	// (whatever nSyms is), so every read stays inside the stream while ip stays above ilowest.
-	MOVQ    DI, R11
-	SUBQ    R8, R11
-	SHRQ    $0x03, R11
-	CMPQ    R11, R10
-	CMOVQCS R11, R10
-	TESTQ   R10, R10
+	// Iterations allowed by the input: a refill reads the 8 bytes below the window and
+	// moves it down by at most 7, so every read stays inside the stream while ip stays
+	// at least 8 above ilowest.
+	MOVQ    DI, R12
+	SUBQ    R8, R12
+	SHRQ    $0x03, R12
+	CMPQ    R12, R11
+	CMOVQCS R12, R11
+	TESTQ   R11, R11
 	JZ      done
-	IMUL3Q  $0x07, R10, R10
-	ADDQ    BX, R10
+	IMUL3Q  $0x07, R11, R11
+	ADDQ    BX, R11
 
 inner_loop:
 	// symbol 0
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, (BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, (BX)
 
 	// symbol 1
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 1(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 1(BX)
 
 	// symbol 2
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 2(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 2(BX)
 
 	// symbol 3
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 3(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 3(BX)
 
 	// symbol 4
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 4(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 4(BX)
 
 	// symbol 5
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 5(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 5(BX)
 
 	// symbol 6
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 6(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 6(BX)
 
-	// Reload the bit container
-	TZCNTQ R9, R9
-	MOVQ   R9, R11
-	ANDQ   $0x07, R11
-	SHRQ   $0x03, R9
-	SUBQ   R9, DI
-	MOVQ   (DI), R9
-	ORQ    $0x01, R9
-	SHLXQ  R11, R9, R9
-	ADDQ   $0x07, BX
-	CMPQ   BX, R10
-	JB     inner_loop
-	JMP    outer_loop
+	// Refill the whole bytes consumed from below the window
+	MOVQ  R10, R12
+	ANDQ  $0x38, R12
+	MOVQ  -8(DI), R13
+	SHRQ  $0x01, R13
+	ANDQ  $0x07, R10
+	MOVQ  R12, R14
+	XORQ  $0x3f, R14
+	SHRXQ R14, R13, R13
+	SHLXQ R10, R13, R13
+	ORQ   R13, R9
+	SHRQ  $0x03, R12
+	SUBQ  R12, DI
+	ADDQ  $0x07, BX
+	CMPQ  BX, R11
+	JB    inner_loop
+	JMP   outer_loop
 
 done:
-	// Hand the state back: off = ip - in, value = the sentinel-form container.
-	// bitReaderShifted.restoreFromAsm normalizes both.
+	// Hand the state back in the Go bit reader's own form: off = ip - in, value, bitsRead.
 	MOVQ (AX), CX
 	SUBQ (CX), DI
 	MOVQ DI, 24(CX)
 	MOVQ R9, 32(CX)
+	MOVB R10, 40(CX)
 	SUBQ 16(AX), BX
 	MOVQ BX, 40(AX)
 	RET
 
 // func decompress1x_4b_main_loop_bmi2(ctx *decompress1xContext)
-// Requires: BMI, BMI2, CMOV
+// Requires: BMI2, CMOV
 TEXT ·decompress1x_4b_main_loop_bmi2(SB), $0-8
 	MOVQ ctx+0(FP), AX
 
@@ -3168,152 +3219,168 @@ TEXT ·decompress1x_4b_main_loop_bmi2(SB), $0-8
 	ADDQ    BX, SI
 	MOVQ    56(AX), DI
 	MOVQ    48(AX), R8
-
-	// Convert the bit reader to sentinel form: bits = value | 1<<bitsRead
 	MOVQ    (AX), R10
 	MOVQ    32(R10), R9
 	MOVBQZX 40(R10), R10
-	BTSQ    R10, R9
 
 outer_loop:
 	// Iterations allowed by the output: (limit - op) / 16
-	MOVQ SI, R10
-	SUBQ BX, R10
+	MOVQ SI, R11
+	SUBQ BX, R11
 	JLE  done
-	SHRQ $0x04, R10
+	SHRQ $0x04, R11
 
-	// Iterations allowed by the input: a reload backs the pointer up by at most 7 bytes
-	// (whatever nSyms is), so every read stays inside the stream while ip stays above ilowest.
-	MOVQ    DI, R11
-	SUBQ    R8, R11
-	SHRQ    $0x03, R11
-	CMPQ    R11, R10
-	CMOVQCS R11, R10
-	TESTQ   R10, R10
+	// Iterations allowed by the input: a refill reads the 8 bytes below the window and
+	// moves it down by at most 7, so every read stays inside the stream while ip stays
+	// at least 8 above ilowest.
+	MOVQ    DI, R12
+	SUBQ    R8, R12
+	SHRQ    $0x03, R12
+	CMPQ    R12, R11
+	CMOVQCS R12, R11
+	TESTQ   R11, R11
 	JZ      done
-	IMUL3Q  $0x0e, R10, R10
-	ADDQ    BX, R10
+	IMUL3Q  $0x0e, R11, R11
+	ADDQ    BX, R11
 
 inner_loop:
 	// symbol 0
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, (BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, (BX)
 
 	// symbol 1
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 1(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 1(BX)
 
 	// symbol 2
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 2(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 2(BX)
 
 	// symbol 3
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 3(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 3(BX)
 
 	// symbol 4
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 4(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 4(BX)
 
 	// symbol 5
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 5(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 5(BX)
 
 	// symbol 6
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 6(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 6(BX)
 
 	// symbol 7
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 7(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 7(BX)
 
 	// symbol 8
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 8(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 8(BX)
 
 	// symbol 9
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 9(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 9(BX)
 
 	// symbol 10
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 10(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 10(BX)
 
 	// symbol 11
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 11(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 11(BX)
 
 	// symbol 12
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 12(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 12(BX)
 
 	// symbol 13
-	SHRXQ   CX, R9, R11
-	MOVWQZX (DX)(R11*2), R11
-	SHLXQ   R11, R9, R9
-	SHRQ    $0x08, R11
-	MOVB    R11, 13(BX)
+	SHRXQ   CX, R9, R12
+	MOVWQZX (DX)(R12*2), R12
+	SHLXQ   R12, R9, R9
+	ADDQ    R12, R10
+	SHRQ    $0x08, R12
+	MOVB    R12, 13(BX)
 
-	// Reload the bit container
-	TZCNTQ R9, R9
-	MOVQ   R9, R11
-	ANDQ   $0x07, R11
-	SHRQ   $0x03, R9
-	SUBQ   R9, DI
-	MOVQ   (DI), R9
-	ORQ    $0x01, R9
-	SHLXQ  R11, R9, R9
-	ADDQ   $0x0e, BX
-	CMPQ   BX, R10
-	JB     inner_loop
-	JMP    outer_loop
+	// Refill the whole bytes consumed from below the window
+	MOVQ  R10, R12
+	ANDQ  $0x38, R12
+	MOVQ  -8(DI), R13
+	SHRQ  $0x01, R13
+	ANDQ  $0x07, R10
+	MOVQ  R12, R14
+	XORQ  $0x3f, R14
+	SHRXQ R14, R13, R13
+	SHLXQ R10, R13, R13
+	ORQ   R13, R9
+	SHRQ  $0x03, R12
+	SUBQ  R12, DI
+	ADDQ  $0x0e, BX
+	CMPQ  BX, R11
+	JB    inner_loop
+	JMP   outer_loop
 
 done:
-	// Hand the state back: off = ip - in, value = the sentinel-form container.
-	// bitReaderShifted.restoreFromAsm normalizes both.
+	// Hand the state back in the Go bit reader's own form: off = ip - in, value, bitsRead.
 	MOVQ (AX), CX
 	SUBQ (CX), DI
 	MOVQ DI, 24(CX)
 	MOVQ R9, 32(CX)
+	MOVB R10, 40(CX)
 	SUBQ 16(AX), BX
 	MOVQ BX, 40(AX)
 	RET

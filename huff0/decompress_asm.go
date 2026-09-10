@@ -210,7 +210,9 @@ func (d *Decoder) Decompress1X(dst, src []byte) ([]byte, error) {
 	// The asm decodes whole batches of symbols and only re-checks its
 	// bounds between them, so it needs at least one batch of room (the
 	// output bound rounds nSyms up to 16, see _generate/gen.go) and a full
-	// 8-byte window ahead of the read pointer to enter the loop.
+	// 8-byte window ahead of the read pointer to enter the loop. It also
+	// needs at most 7 bits consumed on entry so that a batch cannot run
+	// the container dry, which prepareForAsm establishes.
 	decoded := 0
 	if maxDecodedSize >= 16 && br.canUseAsm() {
 		br.prepareForAsm()
@@ -231,9 +233,6 @@ func (d *Decoder) Decompress1X(dst, src []byte) ([]byte, error) {
 			decompress1x_main_loop_asm(&ctx)
 		}
 		decoded = ctx.decoded
-		if err := br.restoreFromAsm(); err != nil {
-			return nil, err
-		}
 	}
 	dst = dst[:decoded]
 
