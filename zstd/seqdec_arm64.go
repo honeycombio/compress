@@ -7,6 +7,23 @@ package zstd
 // by the avo arm64 lowering printer) and the dispatch helpers. arm64 has no
 // BMI2, so each helper selects only between the 56-bit / safe variants.
 
+// decodeTwoPassMinWindow is the frame window size from which the
+// synchronous decoder (DecodeAll, or a Reader with concurrency 1) decodes a
+// block in two passes -- sequences into seqVals, then executeSimple -- rather
+// than with the one-pass decodeSync. executePrefetchMinWindow is the window
+// size from which executeSimple prefetches match sources.
+//
+// Both are proxies for how far back matches reach: below about 1 MiB the
+// sources are in L1/L2 and the two-pass decode is a wash while the prefetch
+// costs about a quarter of an execute iteration (+4% on the small-file
+// benchmark corpus); above it, a Neoverse N1 decodes a silesia subset 8%
+// faster end to end and synthetic far-offset data up to 2x faster. They are
+// variables only so tests can force either path.
+var (
+	decodeTwoPassMinWindow   = 1 << 20
+	executePrefetchMinWindow = 1 << 20
+)
+
 // sequenceDecs_decode_arm64 implements the main loop of sequenceDecs in arm64 asm.
 //
 // Please refer to seqdec_generic.go for the reference implementation.

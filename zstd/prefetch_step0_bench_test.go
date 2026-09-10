@@ -3,9 +3,32 @@ package zstd
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// STEP2_GATE overrides both window thresholds for every benchmark in this
+// binary, so one build measures the shipped gate (unset), the two-pass
+// decode with prefetch forced on (0) and the one-pass decode forced
+// (a huge value) on the same frames.
+func init() {
+	if v := os.Getenv("STEP2_GATE"); v != "" {
+		// One value sets both thresholds; "a,b" sets the two-pass and the
+		// prefetch threshold separately.
+		parts := strings.Split(v, ",")
+		n, err := strconv.Atoi(parts[0])
+		if err != nil {
+			panic("STEP2_GATE: " + err.Error())
+		}
+		decodeTwoPassMinWindow, executePrefetchMinWindow = n, n
+		if len(parts) > 1 {
+			if executePrefetchMinWindow, err = strconv.Atoi(parts[1]); err != nil {
+				panic("STEP2_GATE: " + err.Error())
+			}
+		}
+	}
+}
 
 // Companion to prefetch_step0_test.go: loads the storefwd/l2hit/dram corpora
 // written by TestStep0GenCorpus (from $STEP0_CORPUS_DIR) and times DecodeAll

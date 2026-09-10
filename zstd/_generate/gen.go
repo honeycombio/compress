@@ -48,11 +48,12 @@ const compressedBlockOverAlloc = 16
 // size of struct seqVals
 const seqValsSize = 24
 
-// prefetchDist is Step 1 of the match-prefetch experiment (see
-// zstd/prefetch_step1_test.go): the two-pass executeSimple loop prefetches
-// the match source this many sequences ahead of the copy that needs it.
-// 0, the default and what the go:generate line uses, emits today's code.
-var prefetchDist = flag.Int("prefetch-dist", 0, "executeSimple: prefetch the match source this many sequences ahead (0 = off)")
+// prefetchDist is how many sequences ahead the two-pass executeSimple loop
+// prefetches the match source (see executeSimple.generateProcedure). The
+// default is the knee of a distance sweep on Neoverse N1; 0 generates the
+// loop without the prefetch at all. Whether the generated prefetch runs is
+// decided per call by executeAsmContext.prefetch.
+var prefetchDist = flag.Int("prefetch-dist", 8, "executeSimple: prefetch the match source this many sequences ahead (0 = generate no prefetch)")
 
 func main() {
 	flag.Parse()
@@ -1046,14 +1047,19 @@ func (e executeSimple) generateProcedure(name string) {
 	histBase := GP64()
 	histLen := GP64()
 
-	// Step 1 of the match-prefetch experiment. seqVals already holds every
-	// sequence of the block, so a running sum of ll+ml over the next
-	// prefetchDist entries names the output position each future match is
-	// copied to, and that position minus mo names its source. Touch the
-	// source (both halves of a possibly line-straddling copy) prefetchDist
-	// sequences before the copy needs it. Only matches into the decoded
-	// frame are addressed correctly: one reaching into a separate `hist`
-	// buffer prefetches garbage below out, which a prefetch tolerates.
+	// Match-source prefetch. seqVals already holds every sequence of the
+	// block, so a running sum of ll+ml over the next prefetchDist entries
+	// names the output position each future match is copied to, and that
+	// position minus mo names its source. Touch the source (both halves of
+	// a possibly line-straddling copy) prefetchDist sequences before the
+	// copy needs it. On Neoverse N1 the execute stage runs 20-35% faster
+	// once offsets leave L1, and the knee of the distance sweep was 8.
+	//
+	// The helper costs about a quarter of an iteration on data with nothing
+	// to hide (small windows), so the caller switches it per call through
+	// ctx.prefetch, which folds into the bound check below: with the
+	// prefetch off, the end pointer is the start pointer and every helper
+	// takes its skip branch.
 	//
 	// Register budget: the copy code already peaks at the full register
 	// file and avo has no spilling, so any new loop-carried register is a
@@ -1088,11 +1094,16 @@ func (e executeSimple) generateProcedure(name string) {
 		JZ(LabelRef("empty_seqs"))
 		Load(ctx.Field("seqs").Base(), seqsBase)
 		if e.prefetchDist > 0 {
-			Comment("seqsEnd = seqsBase + 24 * len(seqs)")
+			Comment("seqsEnd = seqsBase + 24 * len(seqs) if ctx.prefetch, else seqsBase (prefetch off)")
 			seqsEnd := GP64()
+			MOVQ(seqsBase, seqsEnd)
+			Load(ctx.Field("prefetch"), tmp)
+			TESTQ(tmp, tmp)
+			JZ(LabelRef("prefetch_off"))
 			LEAQ(Mem{Base: seqsLen, Index: seqsLen, Scale: 2}, seqsEnd) // * 3
 			SHLQ(U8(3), seqsEnd)                                        // * 8
 			ADDQ(seqsBase, seqsEnd)
+			Label("prefetch_off")
 			MOVQ(seqsEnd, seqsEndSlot)
 		}
 		Load(ctx.Field("seqIndex"), seqIndex)

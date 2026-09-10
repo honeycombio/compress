@@ -3,12 +3,23 @@
 package zstd
 
 import (
+	"math"
+
 	"github.com/klauspost/compress/internal/cpuinfo"
 )
 
 // The shared decode/decodeSync/executeSimple wrappers and context structs live
 // in seqdec_asm.go; this file only declares the amd64 asm routines and the
 // dispatch helpers that pick the BMI2 / non-BMI2 (and 56-bit / safe) variant.
+
+// decodeTwoPassMinWindow and executePrefetchMinWindow mirror the arm64
+// thresholds (see seqdec_arm64.go). The two-pass sync decode and the
+// match-source prefetch have not been measured on amd64, so neither is
+// enabled here yet; the assembly and the gate exist so tests can force them.
+var (
+	decodeTwoPassMinWindow   = math.MaxInt
+	executePrefetchMinWindow = math.MaxInt
+)
 
 // sequenceDecs_decode implements the main loop of sequenceDecs in x86 asm.
 //

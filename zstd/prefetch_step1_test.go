@@ -308,3 +308,141 @@ func BenchmarkStep1ExecSmall(b *testing.B) {
 		})
 	}
 }
+
+// TestStep2GenSilesia writes every silesia file as its own frame at
+// production settings (SpeedDefault, 8 MiB window) into
+// $STEP0_CORPUS_DIR/silesia, so the two-pass gate can be judged per data
+// type rather than on one concatenation.
+func TestStep2GenSilesia(t *testing.T) {
+	if testing.Short() {
+		t.Skip("only run explicitly")
+	}
+	dir := os.Getenv("STEP0_CORPUS_DIR")
+	sdir := os.Getenv("STEP1_SILESIA_DIR")
+	if dir == "" || sdir == "" {
+		t.Fatal("set STEP0_CORPUS_DIR and STEP1_SILESIA_DIR")
+	}
+	dir = filepath.Join(dir, "silesia")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	enc, err := NewWriter(nil, WithEncoderLevel(SpeedDefault), WithWindowSize(8<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer enc.Close()
+	for _, f := range []string{"dickens", "mozilla", "mr", "nci", "ooffice", "osdb", "reymont", "samba", "sao", "webster", "x-ray", "xml"} {
+		raw, err := os.ReadFile(filepath.Join(sdir, f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		comp := enc.EncodeAll(raw, nil)
+		t.Logf("%s: raw=%d compressed=%d ratio=%.2f", f, len(raw), len(comp), float64(len(raw))/float64(len(comp)))
+		step1Roundtrip(t, f, comp, raw)
+		writeFileBytes(t, filepath.Join(dir, f+".zst"), comp)
+	}
+}
+
+// TestStep2OffsetStats decodes each frame named by STEP1_BUCKETS in
+// STEP0_CORPUS_DIR two-pass and reports how far its matches reach: the
+// share of sequences with offsets past 32 KiB, 128 KiB and 1 MiB, and the
+// share of blocks in which at least a quarter of the sequences reach past
+// 32 KiB / 128 KiB. Calibration data for the per-block mode decision.
+func TestStep2OffsetStats(t *testing.T) {
+	dir := os.Getenv("STEP0_CORPUS_DIR")
+	if dir == "" {
+		t.Skip("set STEP0_CORPUS_DIR")
+	}
+	for _, name := range strings.Split(os.Getenv("STEP1_BUCKETS"), ",") {
+		comp, err := os.ReadFile(filepath.Join(dir, name+".zst"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec, err := NewReader(nil, WithDecoderConcurrency(1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		block := <-dec.decoders
+		frame := block.localFrame
+		frame.bBuf = comp
+		frame.history.reset()
+		if err := frame.reset(&frame.bBuf); err != nil {
+			t.Fatal(err)
+		}
+		hist := &frame.history
+		hist.b = make([]byte, 0, int(frame.FrameContentSize)+compressedBlockOverAlloc)
+		hist.ignoreBuffer = 0
+		var seqs []seqVals
+		var nSeqs, far32, far128, far1m, nBlocks, blocks25at32, blocks25at128 int
+		for {
+			if err := block.reset(frame.rawInput, frame.WindowSize); err != nil {
+				t.Fatal(err)
+			}
+			switch block.Type {
+			case blockTypeRaw:
+				hist.appendKeep(block.data)
+			case blockTypeCompressed:
+				in, err := block.decodeLiterals(block.data, hist)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := block.prepareSequences(in, hist); err != nil {
+					t.Fatal(err)
+				}
+				s := &hist.decoders
+				if s.nSeqs == 0 {
+					hist.b = append(hist.b, s.literals...)
+					break
+				}
+				if cap(seqs) < s.nSeqs {
+					seqs = make([]seqVals, s.nSeqs)
+				}
+				seqs = seqs[:s.nSeqs]
+				s.windowSize = hist.windowSize
+				s.prevOffset = hist.recentOffsets
+				if err := s.decode(seqs); err != nil {
+					t.Fatal(err)
+				}
+				hist.recentOffsets = s.prevOffset
+				var b32, b128 int
+				for i := range seqs {
+					mo := seqs[i].mo
+					if mo > 32<<10 {
+						b32++
+					}
+					if mo > 128<<10 {
+						b128++
+					}
+					if mo > 1<<20 {
+						far1m++
+					}
+				}
+				nSeqs += len(seqs)
+				far32 += b32
+				far128 += b128
+				nBlocks++
+				if b32*4 >= len(seqs) {
+					blocks25at32++
+				}
+				if b128*4 >= len(seqs) {
+					blocks25at128++
+				}
+				s.out = hist.b
+				if err := s.executeSimple(seqs, nil); err != nil {
+					t.Fatal(err)
+				}
+				hist.b = s.out
+			default:
+				t.Fatalf("unhandled block type %v", block.Type)
+			}
+			if block.Last {
+				break
+			}
+		}
+		dec.decoders <- block
+		dec.Close()
+		pct := func(a, b int) float64 { return 100 * float64(a) / float64(b) }
+		t.Logf("%-8s seqs=%8d  >32K %5.1f%%  >128K %5.1f%%  >1M %5.1f%%  | blocks=%4d  25%%-far@32K %5.1f%%  25%%-far@128K %5.1f%%",
+			name, nSeqs, pct(far32, nSeqs), pct(far128, nSeqs), pct(far1m, nSeqs), nBlocks, pct(blocks25at32, nBlocks), pct(blocks25at128, nBlocks))
+	}
+}

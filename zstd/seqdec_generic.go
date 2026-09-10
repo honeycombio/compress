@@ -5,6 +5,15 @@ package zstd
 import (
 	"fmt"
 	"io"
+	"math"
+)
+
+// decodeTwoPassMinWindow mirrors the arm64 threshold (see seqdec_arm64.go);
+// the two-pass sync decode is an assembly-path optimization, so the pure Go
+// decoder never takes it.
+var (
+	decodeTwoPassMinWindow   = math.MaxInt
+	executePrefetchMinWindow = math.MaxInt // referenced by tests; the pure Go execute has no prefetch
 )
 
 // decode sequences from the stream with the provided history but without dictionary.

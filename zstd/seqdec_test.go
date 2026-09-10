@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"os"
 	"reflect"
@@ -303,6 +304,7 @@ func Test_seqdec_decoder(t *testing.T) {
 }
 
 func Test_seqdec_execute(t *testing.T) {
+	defer func(v int) { executePrefetchMinWindow = v }(executePrefetchMinWindow)
 	zr := testCreateZipReader("testdata/seqs.zip", t)
 	tb := t
 	for _, tt := range zr.File {
@@ -340,16 +342,26 @@ func Test_seqdec_execute(t *testing.T) {
 		lits := s.literals
 
 		t.Run(tt.Name, func(t *testing.T) {
-			s.literals = lits
-			if len(s.out) > 0 {
-				s.out = s.out[:0]
+			// Once with the match-source prefetch off and once forced on:
+			// these windows are small, so the second run exercises the
+			// history-buffer redirect for most sequences, and the two must
+			// produce identical output.
+			var outs [2][]byte
+			for i, minWindow := range []int{math.MaxInt, 0} {
+				executePrefetchMinWindow = minWindow
+				s.literals = lits
+				s.out = nil
+				err := s.execute(seqs, hist)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(s.out) != s.seqSize {
+					t.Errorf("want %d != got %d", s.seqSize, len(s.out))
+				}
+				outs[i] = s.out
 			}
-			err := s.execute(seqs, hist)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(s.out) != s.seqSize {
-				t.Errorf("want %d != got %d", s.seqSize, len(s.out))
+			if !bytes.Equal(outs[0], outs[1]) {
+				t.Error("output differs with the match prefetch enabled")
 			}
 		})
 	}

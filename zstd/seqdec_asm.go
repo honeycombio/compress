@@ -55,6 +55,11 @@ type executeAsmContext struct {
 	outPosition int
 	litPosition int
 	windowSize  int
+	// prefetch enables the match-source prefetch in the execute loop. It
+	// pays off once match offsets reach past L1 and costs about a quarter
+	// of an iteration when they do not, so executeSimple sets it from the
+	// window size (see executePrefetchMinWindow).
+	prefetch bool
 }
 
 const noError = 0
@@ -290,6 +295,7 @@ func (s *sequenceDecs) executeSimple(seqs []seqVals, hist []byte) error {
 		litPosition: 0,
 		literals:    s.literals,
 		windowSize:  s.windowSize,
+		prefetch:    s.windowSize >= executePrefetchMinWindow,
 	}
 	// useSafe avoids overwriting the output buffer when the literals slice has
 	// not been allocated with the required over-allocation slack.

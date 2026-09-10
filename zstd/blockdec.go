@@ -492,7 +492,22 @@ func (b *blockDec) decodeCompressed(hist *history) error {
 		return nil
 	}
 	before := len(hist.decoders.out)
-	err = hist.decoders.decodeSync(hist.b[hist.ignoreBuffer:])
+	if hist.dict == nil && hist.windowSize >= decodeTwoPassMinWindow {
+		// Decode the sequences into seqVals first and execute them in a
+		// second pass, as the concurrent decoder does, instead of the
+		// one-pass decodeSync. The execute loop is short enough for the
+		// core to keep several match-source misses in flight, and it can
+		// prefetch sources from the sequence table, so once offsets reach
+		// past L1 it wins on the whole decode; on small windows the two
+		// are even, and the prefetch's overhead is avoided by the same gate
+		// in executeSimple.
+		if err := b.decodeSequences(hist); err != nil {
+			return err
+		}
+		err = hist.decoders.executeSimple(b.sequence, hist.b[hist.ignoreBuffer:])
+	} else {
+		err = hist.decoders.decodeSync(hist.b[hist.ignoreBuffer:])
+	}
 	if err != nil {
 		return err
 	}
