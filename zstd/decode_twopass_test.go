@@ -37,14 +37,73 @@ func twoPassTestInput() []byte {
 	return buf
 }
 
+// forceTwoPass makes the synchronous decoder take the two-pass path on every
+// block (on) or the one-pass path (off) whatever the data, and returns a
+// function restoring the thresholds.
+func forceTwoPass(on bool) func() {
+	a, b := decodeTwoPassMinWindow, twoPassMinFarShare
+	if on {
+		decodeTwoPassMinWindow, twoPassMinFarShare = 0, 0
+	} else {
+		decodeTwoPassMinWindow, twoPassMinFarShare = math.MaxInt, 257
+	}
+	return func() { decodeTwoPassMinWindow, twoPassMinFarShare = a, b }
+}
+
+// TestSequenceDecsUseTwoPass checks the two-pass decision against each kind
+// of offset table.
+func TestSequenceDecsUseTwoPass(t *testing.T) {
+	defer forceTwoPass(false)()
+	decodeTwoPassMinWindow, twoPassMinFarShare = 1<<20, 46
+
+	// fseTable: log-8 table with far slots on codes 17-19 (two of them -1),
+	// the rest on code 3.
+	fseTable := func(far int) *fseDecoder {
+		f := &fseDecoder{actualTableLog: 8, symbolLen: 20}
+		f.norm[3] = int16(256 - far)
+		f.norm[twoPassFarCode] = int16(far - 2)
+		f.norm[twoPassFarCode+1] = -1
+		f.norm[twoPassFarCode+2] = -1
+		return f
+	}
+	rle := func(code uint8) *fseDecoder {
+		return &fseDecoder{actualTableLog: 0, maxBits: code}
+	}
+	predefined := &fseDecoder{preDefined: true}
+
+	tests := []struct {
+		name   string
+		fse    *fseDecoder
+		window int
+		want   bool
+	}{
+		{"fse at threshold", fseTable(46), 1 << 20, true},
+		{"fse at threshold small window", fseTable(46), 1<<20 - 1, false},
+		{"fse below threshold", fseTable(45), 1 << 30, false},
+		{"fse far only", fseTable(256), 1 << 20, true},
+		{"fse none far", fseTable(2), 1 << 30, false},
+		{"rle large window", rle(twoPassFarCode - 1), 1 << 20, true},
+		{"rle small window", rle(twoPassFarCode), 1<<20 - 1, false},
+		{"predefined small window", predefined, 1<<20 - 1, false},
+		{"predefined large window", predefined, 1 << 20, true},
+		{"no table small window", nil, 1<<20 - 1, false},
+		{"no table large window", nil, 1 << 20, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := sequenceDecs{windowSize: tt.window}
+			s.offsets.fse = tt.fse
+			if got := s.useTwoPass(); got != tt.want {
+				t.Errorf("useTwoPass = %v, want %v (share %d)", got, tt.want, tt.fse.codeShare(twoPassFarCode))
+			}
+		})
+	}
+}
+
 // TestDecodeTwoPassMatchesOnePass forces both the two-pass and the one-pass
 // path on any architecture and checks every DecodeAll and Reader shape, plus
 // rejection of corrupt input, on each.
 func TestDecodeTwoPassMatchesOnePass(t *testing.T) {
-	defer func(a, b int) {
-		decodeTwoPassMinWindow, executePrefetchMinWindow = a, b
-	}(decodeTwoPassMinWindow, executePrefetchMinWindow)
-
 	input := twoPassTestInput()
 	frames := map[string][]byte{}
 	for _, lvl := range []EncoderLevel{SpeedDefault, SpeedBestCompression} {
@@ -58,15 +117,15 @@ func TestDecodeTwoPassMatchesOnePass(t *testing.T) {
 
 	paths := []struct {
 		name string
-		gate int
+		on   bool
 	}{
-		{"two-pass+prefetch", 0},
-		{"one-pass", math.MaxInt},
+		{"two-pass+prefetch", true},
+		{"one-pass", false},
 	}
 	for _, p := range paths {
 		for name, comp := range frames {
 			t.Run(p.name+"/"+name, func(t *testing.T) {
-				decodeTwoPassMinWindow, executePrefetchMinWindow = p.gate, p.gate
+				defer forceTwoPass(p.on)()
 
 				dec, err := NewReader(nil, WithDecoderConcurrency(1))
 				if err != nil {

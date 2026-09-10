@@ -76,6 +76,20 @@ type sequenceDecs struct {
 	maxSyncLen   uint64
 }
 
+const twoPassFarCode = 17 // offsets of 128 KiB and up
+
+// useTwoPass reports whether the block is decoded in two passes with the
+// match-source prefetch (seqdec_arm64.go): a window of at least
+// decodeTwoPassMinWindow and, unless the offset table is predefined or
+// RLE, a far-code share of at least twoPassMinFarShare.
+func (s *sequenceDecs) useTwoPass() bool {
+	if s.windowSize < decodeTwoPassMinWindow {
+		return false
+	}
+	share := s.offsets.fse.codeShare(twoPassFarCode)
+	return share < 0 || share >= twoPassMinFarShare
+}
+
 // initialize all 3 decoders from the stream input.
 func (s *sequenceDecs) initialize(br *bitReader, hist *history, out []byte) error {
 	if err := s.litLengths.init(br); err != nil {

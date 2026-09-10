@@ -7,15 +7,15 @@ package zstd
 // by the avo arm64 lowering printer) and the dispatch helpers. arm64 has no
 // BMI2, so each helper selects only between the 56-bit / safe variants.
 
-// From this frame window size the synchronous decoder decodes blocks in two
-// passes (decodeTwoPassMinWindow) and executeSimple prefetches match sources
-// (executePrefetchMinWindow). The window is a proxy for how far matches
-// reach: below 1 MiB the sources are in cache and the extra work costs a few
-// percent; above it a Neoverse N1 decodes text 8-15% faster. Variables so
-// tests can force either path.
+// The synchronous decoder takes the two-pass path, and executeSimple
+// prefetches, when the window is at least decodeTwoPassMinWindow and the
+// block's offset table puts at least twoPassMinFarShare/256 of its
+// sequences 128 KiB or more back (sequenceDecs.useTwoPass). Thresholds
+// from the per-file N1 measurement in #1212; variables so tests can force
+// either path.
 var (
-	decodeTwoPassMinWindow   = 1 << 20
-	executePrefetchMinWindow = 1 << 20
+	twoPassMinFarShare     = 46
+	decodeTwoPassMinWindow = 1 << 20
 )
 
 // sequenceDecs_decode_arm64 implements the main loop of sequenceDecs in arm64 asm.

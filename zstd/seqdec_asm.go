@@ -56,7 +56,7 @@ type executeAsmContext struct {
 	litPosition int
 	windowSize  int
 	// prefetch enables the match-source prefetch in the execute loop; see
-	// executePrefetchMinWindow.
+	// sequenceDecs.useTwoPass.
 	prefetch bool
 }
 
@@ -293,7 +293,7 @@ func (s *sequenceDecs) executeSimple(seqs []seqVals, hist []byte) error {
 		litPosition: 0,
 		literals:    s.literals,
 		windowSize:  s.windowSize,
-		prefetch:    s.windowSize >= executePrefetchMinWindow,
+		prefetch:    s.useTwoPass(),
 	}
 	// useSafe avoids overwriting the output buffer when the literals slice has
 	// not been allocated with the required over-allocation slack.

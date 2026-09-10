@@ -16,8 +16,8 @@ import (
 // and Zen 4 the two-pass decode costs 7-12% on real data; their caches
 // already cover the offsets involved.
 var (
-	decodeTwoPassMinWindow   = math.MaxInt
-	executePrefetchMinWindow = math.MaxInt
+	twoPassMinFarShare     = 257 // never: the share is at most 256
+	decodeTwoPassMinWindow = math.MaxInt
 )
 
 // sequenceDecs_decode implements the main loop of sequenceDecs in x86 asm.

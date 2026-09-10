@@ -5,7 +5,6 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
-	"math"
 	"math/rand"
 	"os"
 	"reflect"
@@ -304,7 +303,6 @@ func Test_seqdec_decoder(t *testing.T) {
 }
 
 func Test_seqdec_execute(t *testing.T) {
-	defer func(v int) { executePrefetchMinWindow = v }(executePrefetchMinWindow)
 	zr := testCreateZipReader("testdata/seqs.zip", t)
 	tb := t
 	for _, tt := range zr.File {
@@ -345,11 +343,12 @@ func Test_seqdec_execute(t *testing.T) {
 			// Prefetch off, then forced on (which on these small windows
 			// exercises the history-buffer redirect); output must match.
 			var outs [2][]byte
-			for i, minWindow := range []int{math.MaxInt, 0} {
-				executePrefetchMinWindow = minWindow
+			for i, on := range []bool{false, true} {
+				restore := forceTwoPass(on)
 				s.literals = lits
 				s.out = nil
 				err := s.execute(seqs, hist)
+				restore()
 				if err != nil {
 					t.Fatal(err)
 				}

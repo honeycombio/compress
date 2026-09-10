@@ -10,8 +10,8 @@ import (
 
 // See seqdec_arm64.go; the pure Go decoder has neither path.
 var (
-	decodeTwoPassMinWindow   = math.MaxInt
-	executePrefetchMinWindow = math.MaxInt
+	twoPassMinFarShare     = 257 // never: the share is at most 256
+	decodeTwoPassMinWindow = math.MaxInt
 )
 
 // decode sequences from the stream with the provided history but without dictionary.
