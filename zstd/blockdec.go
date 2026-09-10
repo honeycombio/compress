@@ -240,9 +240,11 @@ func (b *blockDec) decodeBuf(hist *history) error {
 			b.dst[i] = v
 		}
 		hist.appendKeep(b.dst)
+		hist.decoders.consumeSyncLen(len(b.dst))
 		return nil
 	case blockTypeRaw:
 		hist.appendKeep(b.data)
+		hist.decoders.consumeSyncLen(len(b.data))
 		return nil
 	case blockTypeCompressed:
 		saved := b.dst
