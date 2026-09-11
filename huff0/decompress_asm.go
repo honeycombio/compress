@@ -14,6 +14,10 @@ import (
 // fallback8BitSize is the size where using Go version is faster.
 const fallback8BitSize = 800
 
+// decompress4xContext is the argument block of the Decompress4X asm loops.
+// Go fills every field but decoded and inner; the asm advances ip, and on
+// return leaves each bit reader in the form bitReaderShifted.restoreFromAsm
+// expects.
 type decompress4xContext struct {
 	pbr      *[4]bitReaderShifted
 	peekBits uint8
@@ -21,8 +25,19 @@ type decompress4xContext struct {
 	dstEvery int
 	tbl      *dEntrySingle
 	decoded  int
-	limit    *byte
+	limit    *byte    // stream 0's output pointer must stay below this
+	ilowest  *byte    // start of the input block; no read goes below it
+	ip       [4]*byte // each stream's 8-byte input window, advanced by the asm
+	inner    *byte    // scratch for the asm: the current inner-loop limit
 }
+
+// Symbols decoded per stream between reloads by the 4X asm loops; must
+// match the constants of the same names in _generate/gen.go.
+const (
+	fast4XSymbols   = 5  // tablelog 9..11
+	fast4X8bSymbols = 7  // tablelog 5..8
+	fast4X4bSymbols = 14 // tablelog <= 4
+)
 
 // Decompress4X will decompress a 4X encoded stream.
 // The length of the supplied input must match the end of a block exactly.
@@ -72,23 +87,55 @@ func (d *Decoder) Decompress4X(dst, src []byte) ([]byte, error) {
 
 	var decoded int
 
-	if len(out) > 4*4 && !(br[0].off < 4 || br[1].off < 4 || br[2].off < 4 || br[3].off < 4) {
+	nSyms := fast4XSymbols
+	if d.actualTableLog <= 4 {
+		nSyms = fast4X4bSymbols
+	} else if use8BitTables {
+		nSyms = fast4X8bSymbols
+	}
+	// The asm writes nSyms bytes per stream per iteration and only re-checks
+	// its bounds between batches of iterations (the batch size is derived
+	// from limit in _generate/gen.go), so stream 0 must stop early enough
+	// that stream 3 (which may be up to 3 bytes shorter than dstEvery)
+	// never writes past the end of out. Every stream needs a full 8-byte
+	// window ahead of its read pointer to enter the loop.
+	if limit := dstEvery - nSyms - 2; limit > 0 && br[0].canUseAsm() && br[1].canUseAsm() && br[2].canUseAsm() && br[3].canUseAsm() {
+		for i := range br {
+			br[i].prepareForAsm()
+		}
 		ctx := decompress4xContext{
 			pbr:      &br,
 			peekBits: uint8((64 - d.actualTableLog) & 63), // see: bitReaderShifted.peekBitsFast()
 			out:      &out[0],
 			dstEvery: dstEvery,
 			tbl:      &single[0],
-			limit:    &out[dstEvery-4], // Always stop decoding when first buffer gets here to avoid writing OOB on last.
+			limit:    &out[limit],
+			// The 6-byte jump table sits below stream 0 inside src, so the
+			// lowest window may reach into it; restoreFromAsm accounts for
+			// bytes below a stream's start. Bounding by src rather than by
+			// stream 0 keeps the asm running about six bytes longer, which
+			// matters for streams with very short codes.
+			ilowest: &src[0],
 		}
-		if use8BitTables {
+		for i := range br {
+			ctx.ip[i] = &br[i].in[br[i].off]
+		}
+		switch nSyms {
+		case fast4X4bSymbols:
+			decompress4x_4b_main_loop_asm(&ctx)
+		case fast4X8bSymbols:
 			decompress4x_8b_main_loop_asm(&ctx)
-		} else {
+		default:
 			decompress4x_main_loop_asm(&ctx)
 		}
 
 		decoded = ctx.decoded
 		out = out[decoded/4:]
+		for i := range br {
+			if err := br[i].restoreFromAsm(); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	// Decode remaining.
