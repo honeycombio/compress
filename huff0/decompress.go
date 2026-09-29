@@ -132,6 +132,7 @@ func ReadTable(in []byte, s *Scratch) (s2 *Scratch, remain []byte, err error) {
 	// TODO: Choose between single/double symbol decoding
 
 	// Calculate starting value for each rank
+	counts := rankStats
 	{
 		var nextRankStart uint32
 		for n := uint8(1); n < s.actualTableLog+1; n++ {
@@ -142,7 +143,7 @@ func ReadTable(in []byte, s *Scratch) (s2 *Scratch, remain []byte, err error) {
 	}
 
 	// fill DTable (always full size)
-	tSize := 1 << tableLogMax
+	const tSize = 1 << tableLogMax
 	if len(s.dt.single) != tSize {
 		s.dt.single = make([]dEntrySingle, tSize)
 	}
@@ -154,38 +155,60 @@ func ReadTable(in []byte, s *Scratch) (s2 *Scratch, remain []byte, err error) {
 	s.prevTable = cTable[:s.symbolLen]
 	s.prevTableLog = s.actualTableLog
 
-	for n, w := range s.huffWeight[:s.symbolLen] {
-		if w == 0 {
-			cTable[n] = cTableEntry{
-				val:   0,
-				nBits: 0,
-			}
-			continue
+	// Group the symbols by weight, keeping symbol order within a weight, so
+	// each weight is filled with a run length that does not change from one
+	// symbol to the next. Weight-0 symbols have no entries and go last.
+	weights := s.huffWeight[:s.symbolLen]
+	var bySymbol [maxSymbolValue + 1]uint8
+	var next [16]uint16
+	{
+		var pos uint16
+		for w := 1; w <= int(s.actualTableLog); w++ {
+			next[w] = pos
+			pos += uint16(counts[w])
 		}
-		length := (uint32(1) << w) >> 1
-		d := dEntrySingle{
-			entry: uint16(s.actualTableLog+1-w) | (uint16(n) << 8),
-		}
+		next[0] = pos
+	}
+	for n, w := range weights {
+		bySymbol[next[w&15]] = uint8(n)
+		next[w&15]++
+	}
+	clear(cTable[:s.symbolLen])
 
-		rank := &rankStats[w]
-		cTable[n] = cTableEntry{
-			val:   uint16(*rank >> (w - 1)),
-			nBits: uint8(d.entry),
-		}
-
-		// length is a power of two; runs of 4 or more are filled 4 at a time.
-		single := s.dt.single[*rank : *rank+length]
-		if length >= 4 {
-			for i := 0; i < len(single); i += 4 {
-				s4 := single[i : i+4 : i+4]
-				s4[0], s4[1], s4[2], s4[3] = d, d, d, d
+	single := s.dt.single[:tSize]
+	var sym uint16
+	for w := uint8(1); w <= s.actualTableLog; w++ {
+		pos := rankStats[w]
+		nBits := uint16(s.actualTableLog + 1 - w)
+		syms := bySymbol[sym:next[w]]
+		sym = next[w]
+		switch length := uint32(1) << (w - 1); length {
+		case 1:
+			for _, n := range syms {
+				cTable[n] = cTableEntry{val: uint16(pos), nBits: uint8(nBits)}
+				single[pos&(tSize-1)] = dEntrySingle{entry: nBits | uint16(n)<<8}
+				pos++
 			}
-		} else {
-			for i := range single {
-				single[i] = d
+		case 2:
+			for _, n := range syms {
+				cTable[n] = cTableEntry{val: uint16(pos >> 1), nBits: uint8(nBits)}
+				d := dEntrySingle{entry: nBits | uint16(n)<<8}
+				s2 := single[pos&(tSize-1):][:2]
+				s2[0], s2[1] = d, d
+				pos += 2
+			}
+		default:
+			for _, n := range syms {
+				cTable[n] = cTableEntry{val: uint16(pos >> (w - 1)), nBits: uint8(nBits)}
+				d := dEntrySingle{entry: nBits | uint16(n)<<8}
+				run := single[pos&(tSize-1):][:length]
+				for i := 0; i < len(run); i += 4 {
+					s4 := run[i : i+4 : i+4]
+					s4[0], s4[1], s4[2], s4[3] = d, d, d, d
+				}
+				pos += length
 			}
 		}
-		*rank += length
 	}
 
 	return s, in, nil

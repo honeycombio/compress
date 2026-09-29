@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
+	"math/rand"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -283,6 +286,71 @@ func TestReadTableWeights(t *testing.T) {
 				t.Fatalf("tableLog %d, symbols %d; want 5, 6", s.actualTableLog, s.symbolLen)
 			}
 		})
+	}
+}
+
+// TestReadTableFill checks the decoding and encoding tables ReadTable builds
+// against a direct per-symbol fill, over tables from many symbol counts,
+// skews and table logs.
+func TestReadTableFill(t *testing.T) {
+	// refFill fills the tables one symbol at a time, in symbol order.
+	refFill := func(weights []uint8, tableLog uint8) ([]dEntrySingle, []cTableEntry) {
+		var rank [16]uint32
+		for _, w := range weights {
+			rank[w]++
+		}
+		var next uint32
+		for w := uint8(1); w <= tableLog; w++ {
+			cur := next
+			next += rank[w] << (w - 1)
+			rank[w] = cur
+		}
+		single := make([]dEntrySingle, 1<<tableLog)
+		ct := make([]cTableEntry, len(weights))
+		for n, w := range weights {
+			if w == 0 {
+				continue
+			}
+			d := dEntrySingle{entry: uint16(tableLog+1-w) | uint16(n)<<8}
+			ct[n] = cTableEntry{val: uint16(rank[w] >> (w - 1)), nBits: tableLog + 1 - w}
+			for i := uint32(0); i < 1<<w>>1; i++ {
+				single[rank[w]+i] = d
+			}
+			rank[w] += 1 << w >> 1
+		}
+		return single, ct
+	}
+
+	rng := rand.New(rand.NewSource(1))
+	tables := 0
+	for iter := 0; iter < 600; iter++ {
+		nSyms := 2 + rng.Intn(255)
+		skew := 1 + rng.Float64()*8
+		in := make([]byte, 2<<10+rng.Intn(8<<10))
+		for i := range in {
+			in[i] = byte(float64(nSyms) * math.Pow(rng.Float64(), skew))
+		}
+		var enc Scratch
+		enc.TableLog = uint8(5 + rng.Intn(tableLogMax-4))
+		comp, _, err := Compress1X(in, &enc)
+		if err != nil {
+			continue // incompressible or RLE
+		}
+		s, _, err := ReadTable(comp, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tables++
+		wantSingle, wantCT := refFill(s.huffWeight[:s.symbolLen], s.actualTableLog)
+		if got := s.dt.single[:1<<s.actualTableLog]; !slices.Equal(got, wantSingle) {
+			t.Fatalf("table %d (tableLog %d, %d symbols): decoding table differs", iter, s.actualTableLog, s.symbolLen)
+		}
+		if !slices.Equal(s.prevTable, wantCT) {
+			t.Fatalf("table %d (tableLog %d, %d symbols): encoding table differs", iter, s.actualTableLog, s.symbolLen)
+		}
+	}
+	if tables < 300 {
+		t.Fatalf("only %d compressible inputs", tables)
 	}
 }
 
