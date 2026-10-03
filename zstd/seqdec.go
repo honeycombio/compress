@@ -370,85 +370,21 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 		if size-startSize > maxBlockSize {
 			return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 		}
-		if size > cap(out) {
-			// Not enough size, which can happen under high volume block streaming conditions
-			// but could be if destination slice is too small for sync operations.
-			// over-allocating here can create a large amount of GC pressure so we try to keep
-			// it as contained as possible
-			used := len(out) - startSize
-			addBytes := 256 + ll + ml + used>>2
-			// Clamp to max block size.
-			if used+addBytes > maxBlockSize {
-				addBytes = maxBlockSize - used
-			}
-			out = append(out, make([]byte, addBytes)...)
-			out = out[:len(out)-addBytes]
-		}
-		if ml > maxMatchLen {
-			return fmt.Errorf("match len (%d) bigger than max allowed length", ml)
-		}
-
-		// Add literals
-		out = append(out, s.literals[:ll]...)
-		s.literals = s.literals[ll:]
-
-		if mo == 0 && ml > 0 {
-			return fmt.Errorf("zero matchoff and matchlen (%d) > 0", ml)
-		}
-
-		if mo > len(out)+len(hist) || mo > s.windowSize {
-			if len(s.dict) == 0 {
-				return fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
-			}
-
-			// we may be in dictionary.
-			dictO := len(s.dict) - (mo - (len(out) + len(hist)))
-			if dictO < 0 || dictO >= len(s.dict) {
-				return fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
-			}
-			end := dictO + ml
-			if end > len(s.dict) {
-				out = append(out, s.dict[dictO:]...)
-				ml -= len(s.dict) - dictO
-			} else {
-				out = append(out, s.dict[dictO:end]...)
-				mo = 0
-				ml = 0
-			}
-		}
-
-		// Copy from history.
-		// TODO: Blocks without history could be made to ignore this completely.
-		if v := mo - len(out); v > 0 {
-			// v is the start position in history from end.
-			start := len(hist) - v
-			if ml > v {
-				// Some goes into current block.
-				// Copy remainder of history
-				out = append(out, hist[start:]...)
-				ml -= v
-			} else {
-				out = append(out, hist[start:start+ml]...)
-				ml = 0
-			}
-		}
-		// We must be in current buffer now
-		if ml > 0 {
-			start := len(out) - mo
-			if ml <= len(out)-start {
-				// No overlap
-				out = append(out, out[start:start+ml]...)
-			} else {
-				// Overlapping copy
-				// Extend destination slice and copy one byte at the time.
-				out = out[:len(out)+ml]
-				src := out[start : start+ml]
-				// Destination is the space we just added.
-				dst := out[len(out)-ml:]
-				dst = dst[:len(src)]
-				for i := range src {
-					dst[i] = src[i]
-				}
+		if t := len(out); ll <= 16 && ml <= 16 && mo >= 16 && mo <= t+ll && mo <= s.windowSize &&
+			t+ll+16 <= cap(out) && cap(s.literals) >= 16 {
+			// Short sequence inside out: copy 16 bytes for each part,
+			// with no calls on the common path.
+			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(s.literals[:16])
+			t += ll
+			start := t - mo
+			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(out[start : start+16])
+			out = out[:t+ml]
+			s.literals = s.literals[ll:]
+		} else {
+			var err error
+			out, err = s.executeSeq(out, hist, ll, mo, ml, startSize, maxBlockSize)
+			if err != nil {
+				return err
 			}
 		}
 		if i == 0 {
@@ -485,6 +421,92 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 	// Add final literals
 	s.out = append(out, s.literals...)
 	return br.close()
+}
+
+// executeSeq appends the literals and match of one sequence to out.
+func (s *sequenceDecs) executeSeq(out, hist []byte, ll, mo, ml, startSize, maxBlockSize int) ([]byte, error) {
+	if ll+ml+len(out) > cap(out) {
+		// Not enough size, which can happen under high volume block streaming conditions
+		// but could be if destination slice is too small for sync operations.
+		// over-allocating here can create a large amount of GC pressure so we try to keep
+		// it as contained as possible
+		used := len(out) - startSize
+		addBytes := 256 + ll + ml + used>>2
+		// Clamp to max block size.
+		if used+addBytes > maxBlockSize {
+			addBytes = maxBlockSize - used
+		}
+		out = append(out, make([]byte, addBytes)...)
+		out = out[:len(out)-addBytes]
+	}
+	if ml > maxMatchLen {
+		return nil, fmt.Errorf("match len (%d) bigger than max allowed length", ml)
+	}
+
+	// Add literals
+	out = append(out, s.literals[:ll]...)
+	s.literals = s.literals[ll:]
+
+	if mo == 0 && ml > 0 {
+		return nil, fmt.Errorf("zero matchoff and matchlen (%d) > 0", ml)
+	}
+
+	if mo > len(out)+len(hist) || mo > s.windowSize {
+		if len(s.dict) == 0 {
+			return nil, fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
+		}
+
+		// we may be in dictionary.
+		dictO := len(s.dict) - (mo - (len(out) + len(hist)))
+		if dictO < 0 || dictO >= len(s.dict) {
+			return nil, fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
+		}
+		end := dictO + ml
+		if end > len(s.dict) {
+			out = append(out, s.dict[dictO:]...)
+			ml -= len(s.dict) - dictO
+		} else {
+			out = append(out, s.dict[dictO:end]...)
+			mo = 0
+			ml = 0
+		}
+	}
+
+	// Copy from history.
+	// TODO: Blocks without history could be made to ignore this completely.
+	if v := mo - len(out); v > 0 {
+		// v is the start position in history from end.
+		start := len(hist) - v
+		if ml > v {
+			// Some goes into current block.
+			// Copy remainder of history
+			out = append(out, hist[start:]...)
+			ml -= v
+		} else {
+			out = append(out, hist[start:start+ml]...)
+			ml = 0
+		}
+	}
+	// We must be in current buffer now
+	if ml > 0 {
+		start := len(out) - mo
+		if ml <= len(out)-start {
+			// No overlap
+			out = append(out, out[start:start+ml]...)
+		} else {
+			// Overlapping copy
+			// Extend destination slice and copy one byte at the time.
+			out = out[:len(out)+ml]
+			src := out[start : start+ml]
+			// Destination is the space we just added.
+			dst := out[len(out)-ml:]
+			dst = dst[:len(src)]
+			for i := range src {
+				dst[i] = src[i]
+			}
+		}
+	}
+	return out, nil
 }
 
 var bitMask [16]uint16

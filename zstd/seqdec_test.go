@@ -709,6 +709,8 @@ func TestDecoderShortSequenceCopies(t *testing.T) {
 		name     string
 		wordLens []int // lengths of the repeated words the encoder should match
 		litLens  []int // lengths of the random runs between words
+		// if set, repeat 3..20 bytes from offsets 1..maxOffset instead of words
+		maxOffset int
 	}{
 		{name: "words16-lits0", wordLens: []int{16}, litLens: []int{0}},
 		{name: "words17-lits0", wordLens: []int{17}, litLens: []int{0}},
@@ -716,6 +718,7 @@ func TestDecoderShortSequenceCopies(t *testing.T) {
 		{name: "words17-lits17", wordLens: []int{17}, litLens: []int{17}},
 		{name: "words15-lits1", wordLens: []int{15}, litLens: []int{1}},
 		{name: "mixed", wordLens: []int{4, 5, 8, 15, 16, 17, 31, 32, 33}, litLens: []int{0, 0, 0, 1, 2, 15, 16, 17, 32, 33}},
+		{name: "offsets40-lits20", litLens: []int{0, 1, 2, 5, 15, 16, 17, 20}, maxOffset: 40},
 	}
 	levels := []EncoderLevel{SpeedFastest, SpeedDefault, SpeedBetterCompression, SpeedBestCompression}
 
@@ -737,7 +740,13 @@ func TestDecoderShortSequenceCopies(t *testing.T) {
 			if n := tc.litLens[rng.Intn(len(tc.litLens))]; n > 0 {
 				input = append(input, randomBytes(n)...)
 			}
-			input = append(input, words[rng.Intn(len(words))]...)
+			if tc.maxOffset == 0 {
+				input = append(input, words[rng.Intn(len(words))]...)
+			} else if mo := 1 + rng.Intn(tc.maxOffset); mo <= len(input) {
+				for range 3 + rng.Intn(18) {
+					input = append(input, input[len(input)-mo])
+				}
+			}
 		}
 
 		for _, level := range levels {
@@ -755,6 +764,18 @@ func TestDecoderShortSequenceCopies(t *testing.T) {
 				}
 				if !bytes.Equal(got, input) {
 					t.Fatalf("DecodeAll output mismatch (len %d vs %d)", len(got), len(input))
+				}
+
+				decodeSyncGoOnly = true
+				restore := forceTwoPass(false)
+				got, err = dec.DecodeAll(compressed, nil)
+				decodeSyncGoOnly = false
+				restore()
+				if err != nil {
+					t.Fatalf("DecodeAll (Go): %v", err)
+				}
+				if !bytes.Equal(got, input) {
+					t.Fatalf("DecodeAll (Go) output mismatch (len %d vs %d)", len(got), len(input))
 				}
 
 				if err := dec.Reset(bytes.NewReader(compressed)); err != nil {
