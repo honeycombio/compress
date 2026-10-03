@@ -179,15 +179,29 @@ func (s *sequenceDecs) executeSimple(seqs []seqVals, hist []byte) error {
 
 	var t = len(s.out)
 	out := s.out[:t+s.seqSize]
+	literals := s.literals
+	windowSize := s.windowSize
 
 	for _, seq := range seqs {
+		if seq.ll <= 16 && seq.ml <= 16 && seq.mo >= 16 && seq.mo <= t+seq.ll && seq.mo <= windowSize &&
+			t+seq.ll+16 <= cap(out) && cap(literals) >= 16 {
+			// Short sequence inside out: copy 16 bytes for each part.
+			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(literals[:16])
+			t += seq.ll
+			start := t - seq.mo
+			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(out[start : start+16])
+			t += seq.ml
+			literals = literals[seq.ll:]
+			continue
+		}
+
 		// Add literals
-		copy(out[t:], s.literals[:seq.ll])
+		copy(out[t:], literals[:seq.ll])
 		t += seq.ll
-		s.literals = s.literals[seq.ll:]
+		literals = literals[seq.ll:]
 
 		// Malformed input
-		if seq.mo > t+len(hist) || seq.mo > s.windowSize {
+		if seq.mo > t+len(hist) || seq.mo > windowSize {
 			return fmt.Errorf("match offset (%d) bigger than current history (%d)", seq.mo, t+len(hist))
 		}
 
@@ -230,9 +244,10 @@ func (s *sequenceDecs) executeSimple(seqs []seqVals, hist []byte) error {
 		}
 	}
 	// Add final literals
-	copy(out[t:], s.literals)
+	copy(out[t:], literals)
+	s.literals = literals
 	if debugDecoder {
-		t += len(s.literals)
+		t += len(literals)
 		if t != len(out) {
 			panic(fmt.Errorf("length mismatch, want %d, got %d, ss: %d", len(out), t, s.seqSize))
 		}

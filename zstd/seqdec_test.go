@@ -454,6 +454,84 @@ func Test_seqdec_decodeSync(t *testing.T) {
 	}
 }
 
+// TestExecuteShortSequences runs execute on random sequences around the
+// 16-byte copies, with and without a dictionary, at every spare output
+// capacity from 0 to 32 bytes, against a byte-by-byte reference.
+func TestExecuteShortSequences(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	random := func(n int) []byte {
+		b := make([]byte, n)
+		rng.Read(b)
+		return b
+	}
+	hist, dict := random(100), random(100)
+
+	tests := []struct {
+		name string
+		dict []byte
+	}{
+		{"nodict", nil},
+		{"dict", dict},
+	}
+	for _, tt := range tests {
+		// The reference output is everything after dict and hist.
+		ref := append(append([]byte(nil), tt.dict...), hist...)
+		base := len(ref)
+		var seqs []seqVals
+		var lits []byte
+		for i := range 3000 {
+			ll, ml := rng.Intn(21), 3+rng.Intn(18)
+			last := i == 2999
+			if last {
+				ll = 5
+			}
+			l := random(ll)
+			lits = append(lits, l...)
+			ref = append(ref, l...)
+			inHist := len(ref) - len(tt.dict)
+			mo := min(16+rng.Intn(25), inHist)
+			switch rng.Intn(8) {
+			case 0:
+				// Overlaps the 16-byte copy unless done bytewise.
+				mo, ml = 1+rng.Intn(15), 12+rng.Intn(5)
+			case 1:
+				mo = 1 + rng.Intn(inHist)
+			case 2:
+				mo = 1 + rng.Intn(len(ref))
+			}
+			if last {
+				// Ends the output at a fixed distance from the capacity.
+				ml, mo = 10, 20
+			}
+			for range ml {
+				ref = append(ref, ref[len(ref)-mo])
+			}
+			seqs = append(seqs, seqVals{ll: ll, ml: ml, mo: mo})
+		}
+		want := ref[base:]
+
+		for _, litExtra := range []int{0, 16} {
+			for extra := range 33 {
+				t.Run(fmt.Sprintf("%s/litextra=%d/extra=%d", tt.name, litExtra, extra), func(t *testing.T) {
+					s := sequenceDecs{
+						dict:       tt.dict,
+						literals:   append(make([]byte, 0, len(lits)+litExtra), lits...),
+						out:        make([]byte, 0, len(want)+extra),
+						seqSize:    len(want),
+						windowSize: 1 << 17,
+					}
+					if err := s.execute(seqs, hist); err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(s.out, want) {
+						t.Fatal("output mismatch")
+					}
+				})
+			}
+		}
+	}
+}
+
 // TestUseSafeDecodeSyncFrameBound checks the copy variant chosen when the
 // frame size is known: only the current block needs the slack, so a buffer
 // sized exactly to the frame uses the extended copies until the last block.
