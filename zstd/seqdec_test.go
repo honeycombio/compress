@@ -530,6 +530,18 @@ func TestExecuteShortSequences(t *testing.T) {
 			}
 		}
 	}
+
+	// A match starting one byte before the dictionary is an error.
+	s := sequenceDecs{
+		dict:       dict,
+		literals:   make([]byte, 0, 16),
+		out:        make([]byte, 0, 64),
+		seqSize:    4,
+		windowSize: 1 << 17,
+	}
+	if err := s.execute([]seqVals{{ml: 4, mo: len(hist) + len(dict) + 1}}, hist); err == nil {
+		t.Fatal("offset before the dictionary decoded without error")
+	}
 }
 
 // TestUseSafeDecodeSyncFrameBound checks the copy variant chosen when the

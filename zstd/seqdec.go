@@ -184,18 +184,19 @@ func (s *sequenceDecs) execute(seqs []seqVals, hist []byte) error {
 	out := s.out[:t+s.seqSize]
 	literals := s.literals
 	windowSize := s.windowSize
+	dict := s.dict
 
 	for _, seq := range seqs {
-		if seq.ll <= 16 && seq.ml <= 16 && seq.mo >= 16 && seq.mo <= t+seq.ll && seq.mo <= windowSize &&
-			t+seq.ll+16 <= cap(out) && cap(literals) >= 16 {
-			// Short sequence inside out: copy 16 bytes for each part.
-			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(literals[:16])
-			t += seq.ll
-			start := t - seq.mo
-			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(out[start : start+16])
-			t += seq.ml
-			literals = literals[seq.ll:]
-			continue
+		// Short sequences copy 16 bytes for each part.
+		if seq.ll <= 16 && seq.ml <= 16 && t+seq.ll+16 <= cap(out) && cap(literals) >= 16 {
+			if src := shortMatch(out, dict, t+seq.ll, seq.mo, len(hist), windowSize); src != nil {
+				*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(literals[:16])
+				t += seq.ll
+				*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(src)
+				t += seq.ml
+				literals = literals[seq.ll:]
+				continue
+			}
 		}
 
 		// Add literals
@@ -301,6 +302,7 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 	literals := s.literals
 	maxBits := s.maxBits
 	windowSize := s.windowSize
+	dict := s.dict
 	seqs := s.nSeqs
 	startSize := len(s.out)
 	// Grab full sizes tables, to avoid bounds checks.
@@ -404,14 +406,17 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 		if size-startSize > maxBlockSize {
 			return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 		}
-		if t := len(out); ll <= 16 && ml <= 16 && mo >= 16 && mo <= t+ll && mo <= windowSize &&
-			t+ll+16 <= cap(out) && cap(literals) >= 16 {
-			// Short sequence inside out: copy 16 bytes for each part, with
-			// no calls so the loop state stays in registers.
+		// Short sequences copy 16 bytes for each part, with no calls so the
+		// loop state stays in registers.
+		t := len(out)
+		var src []byte
+		if ll <= 16 && ml <= 16 && t+ll+16 <= cap(out) && cap(literals) >= 16 {
+			src = shortMatch(out, dict, t+ll, mo, len(hist), windowSize)
+		}
+		if src != nil {
 			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(literals[:16])
 			t += ll
-			start := t - mo
-			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(out[start : start+16])
+			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(src)
 			out = out[:t+ml]
 			literals = literals[ll:]
 		} else {
@@ -459,6 +464,20 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 	s.prevOffset = [3]int{prev0, prev1, prev2}
 	br.setState(bs)
 	return br.close()
+}
+
+// shortMatch returns the 16 bytes a match of at most 16 bytes, starting
+// at p in out, copies from: earlier output it does not overlap, or the
+// dictionary. It returns nil when the match needs the general path.
+func shortMatch(out, dict []byte, p, mo, histLen, windowSize int) []byte {
+	if mo >= 16 && mo <= p && mo <= windowSize {
+		return out[p-mo : p-mo+16]
+	}
+	// d is how far the match reaches back past the history into dict.
+	if d := mo - (p + histLen); d >= 16 && d <= len(dict) {
+		return dict[len(dict)-d:][:16]
+	}
+	return nil
 }
 
 // executeSeq appends the literals and match of one sequence to out and

@@ -183,16 +183,16 @@ func (s *sequenceDecs) executeSimple(seqs []seqVals, hist []byte) error {
 	windowSize := s.windowSize
 
 	for _, seq := range seqs {
-		if seq.ll <= 16 && seq.ml <= 16 && seq.mo >= 16 && seq.mo <= t+seq.ll && seq.mo <= windowSize &&
-			t+seq.ll+16 <= cap(out) && cap(literals) >= 16 {
-			// Short sequence inside out: copy 16 bytes for each part.
-			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(literals[:16])
-			t += seq.ll
-			start := t - seq.mo
-			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(out[start : start+16])
-			t += seq.ml
-			literals = literals[seq.ll:]
-			continue
+		// Short sequences copy 16 bytes for each part.
+		if seq.ll <= 16 && seq.ml <= 16 && t+seq.ll+16 <= cap(out) && cap(literals) >= 16 {
+			if src := shortMatch(out, nil, t+seq.ll, seq.mo, len(hist), windowSize); src != nil {
+				*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(literals[:16])
+				t += seq.ll
+				*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(src)
+				t += seq.ml
+				literals = literals[seq.ll:]
+				continue
+			}
 		}
 
 		// Add literals
