@@ -278,25 +278,33 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 		}
 	}
 
+	// The bit reader, repeat offsets and literals are held in locals so
+	// they stay in registers; they are written back on success.
 	br := s.br
+	in, bs := br.in, br.state()
+	prev0, prev1, prev2 := s.prevOffset[0], s.prevOffset[1], s.prevOffset[2]
+	literals := s.literals
+	maxBits := s.maxBits
+	windowSize := s.windowSize
 	seqs := s.nSeqs
 	startSize := len(s.out)
 	// Grab full sizes tables, to avoid bounds checks.
 	llTable, mlTable, ofTable := s.litLengths.fse.dt[:maxTablesize], s.matchLengths.fse.dt[:maxTablesize], s.offsets.fse.dt[:maxTablesize]
 	llState, mlState, ofState := s.litLengths.state.state, s.matchLengths.state.state, s.offsets.state.state
 	out := s.out
-	maxBlockSize := min(s.windowSize, maxCompressedBlockSize)
+	maxBlockSize := min(windowSize, maxCompressedBlockSize)
 
 	if debugDecoder {
 		println("decodeSync: decoding", seqs, "sequences", br.remain(), "bits remain on stream")
 	}
 	for i := seqs - 1; i >= 0; i-- {
-		if br.overread() {
+		if bs.bitsRead > 64 {
+			br.setState(bs)
 			printf("reading sequence %d, exceeded available data. Overread by %d\n", seqs-i, -br.remain())
 			return io.ErrUnexpectedEOF
 		}
 		var ll, mo, ml int
-		if br.cursor > 4+((maxOffsetBits+16+16)>>3) {
+		if bs.cursor > 4+((maxOffsetBits+16+16)>>3) {
 			// inlined function:
 			// ll, mo, ml = s.nextFast(br, llState, mlState, ofState)
 
@@ -307,18 +315,22 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 			mo, moB = ofState.final()
 
 			// extra bits are stored in reverse order.
-			br.fillFast()
-			mo += br.getBits(moB)
-			if s.maxBits > 32 {
-				br.fillFast()
+			var v int
+			bs = bs.fillFast(in)
+			bs, v = bs.getBits(moB)
+			mo += v
+			if maxBits > 32 {
+				bs = bs.fillFast(in)
 			}
-			ml += br.getBits(mlB)
-			ll += br.getBits(llB)
+			bs, v = bs.getBits(mlB)
+			ml += v
+			bs, v = bs.getBits(llB)
+			ll += v
 
 			if moB > 1 {
-				s.prevOffset[2] = s.prevOffset[1]
-				s.prevOffset[1] = s.prevOffset[0]
-				s.prevOffset[0] = mo
+				prev2 = prev1
+				prev1 = prev0
+				prev0 = mo
 			} else {
 				// mo = s.adjustOffset(mo, ll, moB)
 				// Inlined for rather big speedup
@@ -330,13 +342,16 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 				}
 
 				if mo == 0 {
-					mo = s.prevOffset[0]
+					mo = prev0
 				} else {
 					var temp int
-					if mo == 3 {
-						temp = s.prevOffset[0] - 1
-					} else {
-						temp = s.prevOffset[mo]
+					switch mo {
+					case 1:
+						temp = prev1
+					case 2:
+						temp = prev2
+					default:
+						temp = prev0 - 1
 					}
 
 					if temp == 0 {
@@ -346,43 +361,47 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 					}
 
 					if mo != 1 {
-						s.prevOffset[2] = s.prevOffset[1]
+						prev2 = prev1
 					}
-					s.prevOffset[1] = s.prevOffset[0]
-					s.prevOffset[0] = temp
+					prev1 = prev0
+					prev0 = temp
 					mo = temp
 				}
 			}
-			br.fillFast()
+			bs = bs.fillFast(in)
 		} else {
+			br.setState(bs)
+			s.prevOffset = [3]int{prev0, prev1, prev2}
 			ll, mo, ml = s.next(br, llState, mlState, ofState)
 			br.fill()
+			bs = br.state()
+			prev0, prev1, prev2 = s.prevOffset[0], s.prevOffset[1], s.prevOffset[2]
 		}
 
 		if debugSequences {
 			println("Seq", seqs-i-1, "Litlen:", ll, "mo:", mo, "(abs) ml:", ml)
 		}
 
-		if ll > len(s.literals) {
-			return fmt.Errorf("unexpected literal count, want %d bytes, but only %d is available", ll, len(s.literals))
+		if ll > len(literals) {
+			return fmt.Errorf("unexpected literal count, want %d bytes, but only %d is available", ll, len(literals))
 		}
 		size := ll + ml + len(out)
 		if size-startSize > maxBlockSize {
 			return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 		}
-		if t := len(out); ll <= 16 && ml <= 16 && mo >= 16 && mo <= t+ll && mo <= s.windowSize &&
-			t+ll+16 <= cap(out) && cap(s.literals) >= 16 {
-			// Short sequence inside out: copy 16 bytes for each part,
-			// with no calls on the common path.
-			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(s.literals[:16])
+		if t := len(out); ll <= 16 && ml <= 16 && mo >= 16 && mo <= t+ll && mo <= windowSize &&
+			t+ll+16 <= cap(out) && cap(literals) >= 16 {
+			// Short sequence inside out: copy 16 bytes for each part, with
+			// no calls so the loop state stays in registers.
+			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(literals[:16])
 			t += ll
 			start := t - mo
 			*(*[16]byte)(out[t : t+16]) = *(*[16]byte)(out[start : start+16])
 			out = out[:t+ml]
-			s.literals = s.literals[ll:]
+			literals = literals[ll:]
 		} else {
 			var err error
-			out, err = s.executeSeq(out, hist, ll, mo, ml, startSize, maxBlockSize)
+			out, literals, err = s.executeSeq(out, literals, hist, ll, mo, ml, startSize, maxBlockSize)
 			if err != nil {
 				return err
 			}
@@ -400,7 +419,8 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 			mlState = mlTable[mlState.newState()&maxTableMask]
 			ofState = ofTable[ofState.newState()&maxTableMask]
 		} else {
-			bits := br.get32BitsFast(nBits)
+			var bits uint32
+			bs, bits = bs.get32BitsFast(nBits)
 
 			lowBits := uint16(bits >> ((ofState.nbBits() + mlState.nbBits()) & 31))
 			llState = llTable[(llState.newState()+lowBits)&maxTableMask]
@@ -414,17 +434,21 @@ func (s *sequenceDecs) decodeSync(hist []byte) error {
 		}
 	}
 
-	if size := len(s.literals) + len(out) - startSize; size > maxBlockSize {
+	if size := len(literals) + len(out) - startSize; size > maxBlockSize {
 		return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 	}
 
 	// Add final literals
-	s.out = append(out, s.literals...)
+	s.out = append(out, literals...)
+	s.literals = literals
+	s.prevOffset = [3]int{prev0, prev1, prev2}
+	br.setState(bs)
 	return br.close()
 }
 
-// executeSeq appends the literals and match of one sequence to out.
-func (s *sequenceDecs) executeSeq(out, hist []byte, ll, mo, ml, startSize, maxBlockSize int) ([]byte, error) {
+// executeSeq appends the literals and match of one sequence to out and
+// returns the updated out and remaining literals.
+func (s *sequenceDecs) executeSeq(out, literals, hist []byte, ll, mo, ml, startSize, maxBlockSize int) ([]byte, []byte, error) {
 	if ll+ml+len(out) > cap(out) {
 		// Not enough size, which can happen under high volume block streaming conditions
 		// but could be if destination slice is too small for sync operations.
@@ -440,26 +464,26 @@ func (s *sequenceDecs) executeSeq(out, hist []byte, ll, mo, ml, startSize, maxBl
 		out = out[:len(out)-addBytes]
 	}
 	if ml > maxMatchLen {
-		return nil, fmt.Errorf("match len (%d) bigger than max allowed length", ml)
+		return nil, nil, fmt.Errorf("match len (%d) bigger than max allowed length", ml)
 	}
 
 	// Add literals
-	out = append(out, s.literals[:ll]...)
-	s.literals = s.literals[ll:]
+	out = append(out, literals[:ll]...)
+	literals = literals[ll:]
 
 	if mo == 0 && ml > 0 {
-		return nil, fmt.Errorf("zero matchoff and matchlen (%d) > 0", ml)
+		return nil, nil, fmt.Errorf("zero matchoff and matchlen (%d) > 0", ml)
 	}
 
 	if mo > len(out)+len(hist) || mo > s.windowSize {
 		if len(s.dict) == 0 {
-			return nil, fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
+			return nil, nil, fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
 		}
 
 		// we may be in dictionary.
 		dictO := len(s.dict) - (mo - (len(out) + len(hist)))
 		if dictO < 0 || dictO >= len(s.dict) {
-			return nil, fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
+			return nil, nil, fmt.Errorf("match offset (%d) bigger than current history (%d)", mo, len(out)-startSize)
 		}
 		end := dictO + ml
 		if end > len(s.dict) {
@@ -506,7 +530,7 @@ func (s *sequenceDecs) executeSeq(out, hist []byte, ll, mo, ml, startSize, maxBl
 			}
 		}
 	}
-	return out, nil
+	return out, literals, nil
 }
 
 var bitMask [16]uint16
