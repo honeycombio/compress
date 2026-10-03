@@ -21,12 +21,17 @@ func (s *sequenceDecs) decodeSyncSimple(hist []byte) (bool, error) {
 
 // decode sequences from the stream without the provided history.
 func (s *sequenceDecs) decode(seqs []seqVals) error {
+	// The bit reader and repeat offsets are held in locals so they stay in
+	// registers; they are written back on success.
 	br := s.br
+	in, bs := br.in, br.state()
+	prev0, prev1, prev2 := s.prevOffset[0], s.prevOffset[1], s.prevOffset[2]
+	maxBits := s.maxBits
+	seqSize := 0
 
 	// Grab full sizes tables, to avoid bounds checks.
 	llTable, mlTable, ofTable := s.litLengths.fse.dt[:maxTablesize], s.matchLengths.fse.dt[:maxTablesize], s.offsets.fse.dt[:maxTablesize]
 	llState, mlState, ofState := s.litLengths.state.state, s.matchLengths.state.state, s.offsets.state.state
-	s.seqSize = 0
 	litRemain := len(s.literals)
 
 	maxBlockSize := maxCompressedBlockSize
@@ -35,7 +40,7 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 	}
 	for i := range seqs {
 		var ll, mo, ml int
-		if br.cursor > 4+((maxOffsetBits+16+16)>>3) {
+		if bs.cursor > 4+((maxOffsetBits+16+16)>>3) {
 			// inlined function:
 			// ll, mo, ml = s.nextFast(br, llState, mlState, ofState)
 
@@ -46,18 +51,22 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 			mo, moB = ofState.final()
 
 			// extra bits are stored in reverse order.
-			br.fillFast()
-			mo += br.getBits(moB)
-			if s.maxBits > 32 {
-				br.fillFast()
+			var v int
+			bs = bs.fillFast(in)
+			bs, v = bs.getBits(moB)
+			mo += v
+			if maxBits > 32 {
+				bs = bs.fillFast(in)
 			}
-			ml += br.getBits(mlB)
-			ll += br.getBits(llB)
+			bs, v = bs.getBits(mlB)
+			ml += v
+			bs, v = bs.getBits(llB)
+			ll += v
 
 			if moB > 1 {
-				s.prevOffset[2] = s.prevOffset[1]
-				s.prevOffset[1] = s.prevOffset[0]
-				s.prevOffset[0] = mo
+				prev2 = prev1
+				prev1 = prev0
+				prev0 = mo
 			} else {
 				// mo = s.adjustOffset(mo, ll, moB)
 				// Inlined for rather big speedup
@@ -69,13 +78,16 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 				}
 
 				if mo == 0 {
-					mo = s.prevOffset[0]
+					mo = prev0
 				} else {
 					var temp int
-					if mo == 3 {
-						temp = s.prevOffset[0] - 1
-					} else {
-						temp = s.prevOffset[mo]
+					switch mo {
+					case 1:
+						temp = prev1
+					case 2:
+						temp = prev2
+					default:
+						temp = prev0 - 1
 					}
 
 					if temp == 0 {
@@ -85,23 +97,27 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 					}
 
 					if mo != 1 {
-						s.prevOffset[2] = s.prevOffset[1]
+						prev2 = prev1
 					}
-					s.prevOffset[1] = s.prevOffset[0]
-					s.prevOffset[0] = temp
+					prev1 = prev0
+					prev0 = temp
 					mo = temp
 				}
 			}
-			br.fillFast()
+			bs = bs.fillFast(in)
 		} else {
-			if br.overread() {
+			if bs.bitsRead > 64 {
 				if debugDecoder {
 					printf("reading sequence %d, exceeded available data\n", i)
 				}
 				return io.ErrUnexpectedEOF
 			}
+			br.setState(bs)
+			s.prevOffset = [3]int{prev0, prev1, prev2}
 			ll, mo, ml = s.next(br, llState, mlState, ofState)
 			br.fill()
+			bs = br.state()
+			prev0, prev1, prev2 = s.prevOffset[0], s.prevOffset[1], s.prevOffset[2]
 		}
 
 		if debugSequences {
@@ -115,8 +131,8 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 		if ml > maxMatchLen {
 			return fmt.Errorf("match len (%d) bigger than max allowed length", ml)
 		}
-		s.seqSize += ll + ml
-		if s.seqSize > maxBlockSize {
+		seqSize += ll + ml
+		if seqSize > maxBlockSize {
 			return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 		}
 		litRemain -= ll
@@ -141,7 +157,8 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 			mlState = mlTable[mlState.newState()&maxTableMask]
 			ofState = ofTable[ofState.newState()&maxTableMask]
 		} else {
-			bits := br.get32BitsFast(nBits)
+			var bits uint32
+			bs, bits = bs.get32BitsFast(nBits)
 			lowBits := uint16(bits >> ((ofState.nbBits() + mlState.nbBits()) & 31))
 			llState = llTable[(llState.newState()+lowBits)&maxTableMask]
 
@@ -153,10 +170,12 @@ func (s *sequenceDecs) decode(seqs []seqVals) error {
 			ofState = ofTable[(ofState.newState()+lowBits)&maxTableMask]
 		}
 	}
-	s.seqSize += litRemain
+	s.seqSize = seqSize + litRemain
 	if s.seqSize > maxBlockSize {
 		return fmt.Errorf("output bigger than max block size (%d)", maxBlockSize)
 	}
+	s.prevOffset = [3]int{prev0, prev1, prev2}
+	br.setState(bs)
 	err := br.close()
 	if err != nil {
 		printf("Closing sequences: %v, %+v\n", err, *br)
